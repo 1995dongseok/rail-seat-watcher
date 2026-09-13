@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>기차 빈자리 조회 · 로그인</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --text:#1d2430; --muted:#6b7480; --no:#b42323; --accent:#0b5fb3; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif; }
+  main { max-width:380px; margin:60px auto; padding:0 16px; }
+  h1 { font-size:20px; margin:0 0 16px; text-align:center; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; }
+  .tabs { display:flex; gap:4px; margin-bottom:16px; }
+  .tabs button { flex:1; padding:8px; border:1px solid var(--line); background:#fff; border-radius:6px; font:inherit; cursor:pointer; }
+  .tabs button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 3px; }
+  input { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  button.primary { width:100%; margin-top:16px; padding:10px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  .msg { margin-top:10px; font-size:13px; color:var(--no); min-height:1.2em; }
+  .hint { font-size:12px; color:var(--muted); margin-top:12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>기차 빈자리 조회</h1>
+  <div class="card">
+    <div class="tabs">
+      <button type="button" id="tab_login" class="on">로그인</button>
+      <button type="button" id="tab_register">가입</button>
+    </div>
+    <form id="form">
+      <label>사용자명</label><input id="username" autocomplete="username" required>
+      <label>비밀번호</label><input id="password" type="password" autocomplete="current-password" required>
+      <div id="invite_row" hidden><label>초대코드</label><input id="invite_code"></div>
+      <button type="submit" class="primary" id="btn">로그인</button>
+      <div class="msg" id="msg"></div>
+    </form>
+    <p class="hint">이 계정은 이 앱의 로그인용입니다. 코레일 계정과 텔레그램은 로그인 후 "내 설정"에서 등록합니다.</p>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let mode = 'login';
+function setMode(m) {
+  mode = m;
+  $('tab_login').classList.toggle('on', m === 'login');
+  $('tab_register').classList.toggle('on', m === 'register');
+  $('invite_row').hidden = m !== 'register';
+  $('btn').textContent = m === 'login' ? '로그인' : '가입하고 시작';
+  $('password').autocomplete = m === 'login' ? 'current-password' : 'new-password';
+  $('msg').textContent = '';
+}
+$('tab_login').onclick = () => setMode('login');
+$('tab_register').onclick = () => setMode('register');
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('btn').disabled = true; $('msg').textContent = '';
+  try {
+    const r = await fetch(`/api/auth/${mode}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('username').value, password: $('password').value, invite_code: $('invite_code').value }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const d = body.detail;
+      throw new Error(Array.isArray(d) ? d.map(x => x.msg).join(', ') : (d || r.statusText));
+    }
+    location.href = '/';
+  } catch (err) { $('msg').textContent = err.message; }
+  finally { $('btn').disabled = false; }
+});
+</script>
+</body>
+</html>

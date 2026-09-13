@@ -1,0 +1,7 @@
+# HTTPS 리버스 프록시. 도메인을 인스턴스 IP 로 향하게 한 뒤 아래 주소만 바꾸면
+# Caddy 가 Let's Encrypt 인증서를 자동으로 받아 갱신한다.
+# 도메인이 없으면 "1-2-3-4.sslip.io" 처럼 인스턴스 IP 를 점 대신 대시로 적은 sslip.io 주소를 쓰면 된다.
+rail-watcher.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+    encode gzip
+}

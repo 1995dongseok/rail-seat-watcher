@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>기차 빈자리 조회</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --text:#1d2430; --muted:#6b7480; --ok:#158a4a; --ok-bg:#e6f6ec; --no:#b42323; --no-bg:#fbe9e9; --accent:#0b5fb3; }
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,"Malgun Gothic","Apple SD Gothic Neo",sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:20px 16px 48px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:0; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px 12px; }
+  .route { display:grid; grid-template-columns:1fr auto 1fr; gap:8px; align-items:end; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:3px; }
+  input, select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+  input:disabled, select:disabled { background:#f0f1f3; color:var(--muted); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  button { padding:8px 14px; border:1px solid var(--line); border-radius:6px; background:#fff; font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.swap { padding:8px 10px; font-size:16px; line-height:1; }
+  button:disabled { opacity:.5; cursor:default; }
+  .check { display:flex; align-items:center; gap:6px; font-size:13px; }
+  .check input { width:auto; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:12px 12px 4px; margin:12px 0 0; }
+  legend { font-size:12px; color:var(--muted); padding:0 6px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { padding:8px 6px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; font-size:12px; }
+  .tag { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; font-weight:600; }
+  .ok { background:var(--ok-bg); color:var(--ok); }
+  .no { background:var(--no-bg); color:var(--no); }
+  .wl { background:#fff4d6; color:#8a5a00; }
+  .msg { margin-top:10px; font-size:13px; color:var(--muted); }
+  .msg.err { color:var(--no); }
+  .status { font-size:12px; color:var(--muted); display:flex; gap:14px; flex-wrap:wrap; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; background:#c3c8cf; }
+  .dot.on { background:var(--ok); } .dot.off { background:var(--no); }
+  .wrap { overflow-x:auto; }
+  .muted { color:var(--muted); }
+  .results { display:grid; gap:16px; }
+  @media (min-width:860px) { .results.two { grid-template-columns:1fr 1fr; } }
+  details.result > summary { cursor:pointer; list-style:none; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  details.result > summary::-webkit-details-marker { display:none; }
+  details.result > summary .chev { display:inline-block; transition:transform .15s; color:var(--muted); }
+  details.result[open] > summary .chev { transform:rotate(90deg); }
+  .avail-line { font-size:12px; color:var(--muted); margin:6px 0 0; line-height:1.8; }
+  .avail-line .tag { margin-right:4px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row" style="margin:0 0 4px; align-items:baseline">
+    <h1 style="margin:0">기차 빈자리 조회</h1>
+    <span style="flex:1"></span>
+    <span class="muted" id="who"></span>
+    <a href="/admin" id="admin_link" hidden style="color:var(--accent)">관리자</a>
+    <button type="button" id="btn_logout">로그아웃</button>
+  </div>
+  <p class="sub">코레일 계정으로 특정 날짜·시간·노선의 잔여석을 조회하고, 조회 결과와 빈자리 알림을 텔레그램으로 보냅니다.</p>
+
+  <div class="card" id="denied_box" hidden style="background:var(--no-bg); border-color:#f0c2c2; color:var(--no)">
+    <strong>관리자 승인 대기 중입니다.</strong> 승인 전에는 기차 조회와 감시 기능을 사용할 수 없습니다. 내 설정에서 코레일 계정은 미리 등록해 둘 수 있습니다.
+  </div>
+
+  <div class="card">
+    <div class="status" id="status">상태 확인 중…</div>
+  </div>
+
+  <details class="card" id="settings_box">
+    <summary style="cursor:pointer; font-weight:600">내 설정 (코레일 계정 · 텔레그램) <span class="muted" id="settings_hint" style="font-weight:400; font-size:12px"></span></summary>
+    <div class="grid" style="margin-top:12px">
+      <div><label>코레일 아이디 (이메일/휴대폰/회원번호)</label><input id="s_korail_id" autocomplete="off"></div>
+      <div><label>코레일 비밀번호</label><input id="s_korail_pw" type="password" autocomplete="new-password" placeholder="변경할 때만 입력"></div>
+    </div>
+    <div class="row">
+      <span class="muted" style="font-size:12px">비밀번호는 서버에 암호화되어 저장되고 화면에는 다시 표시되지 않습니다.</span>
+      <span style="flex:1"></span>
+      <button type="button" id="btn_save_settings" class="primary">저장</button>
+      <button type="button" id="btn_korail_test">코레일 로그인 테스트</button>
+    </div>
+    <div class="msg" id="settings_msg"></div>
+
+    <div style="border-top:1px solid var(--line); margin-top:14px; padding-top:12px">
+      <label>텔레그램 알림</label>
+      <div id="tg_linked" hidden class="row" style="margin-top:4px">
+        <span class="tag ok">연결됨</span>
+        <span id="tg_linked_name" class="muted"></span>
+        <span style="flex:1"></span>
+        <button type="button" id="btn_tg_test">텔레그램 테스트</button>
+        <button type="button" id="btn_tg_unlink">연결 해제</button>
+      </div>
+      <div id="tg_unlinked" hidden style="margin-top:4px">
+        <div class="row" style="margin-top:0">
+          <span>텔레그램에서 봇 <a id="tg_bot_link" href="#" target="_blank" rel="noopener"><b id="tg_bot_name">봇</b></a> 을 열고 아래 연결 코드를 보내세요.</span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <code id="tg_code" style="font-size:22px; letter-spacing:4px; padding:6px 12px; background:#f0f1f3; border-radius:6px">------</code>
+          <span class="muted" style="font-size:12px">코드를 보내면 몇 초 안에 자동으로 연결됩니다.</span>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <form class="card" id="form">
+    <div class="route">
+      <div><label>출발역</label><select id="dep" required></select></div>
+      <button type="button" class="swap" id="btn_swap" title="출발역/도착역 바꾸기">⇄</button>
+      <div><label>도착역</label><select id="arr" required></select></div>
+    </div>
+
+    <div class="grid" style="margin-top:12px">
+      <div><label>열차 종류</label>
+        <select id="train_type">
+          <option value="ALL" selected>전체</option>
+          <option value="KTX">KTX</option>
+          <option value="ITX_SAEMAEUL">ITX-새마을</option>
+          <option value="MUGUNGHWA">무궁화</option>
+          <option value="ITX_CHEONGCHUN">ITX-청춘</option>
+        </select>
+      </div>
+      <div><label>알림 대상 좌석</label>
+        <select id="seat_pref">
+          <option value="ANY">일반실 또는 특실</option>
+          <option value="GENERAL">일반실만</option>
+          <option value="SPECIAL">특실만</option>
+        </select>
+      </div>
+    </div>
+
+    <fieldset>
+      <legend>가는 편</legend>
+      <div class="grid">
+        <div><label>출발일</label><input id="date" type="date" required></div>
+        <div><label>시작 시간</label><input id="time_from" type="time" value="06:00"></div>
+        <div><label>종료 시간</label><input id="time_to" type="time" value="22:00"></div>
+      </div>
+    </fieldset>
+
+    <fieldset id="ret_box" hidden>
+      <legend>오는 편</legend>
+      <div class="grid">
+        <div><label>출발일</label><input id="ret_date" type="date"></div>
+        <div><label>시작 시간</label><input id="ret_time_from" type="time" value="06:00"></div>
+        <div><label>종료 시간</label><input id="ret_time_to" type="time" value="22:00"></div>
+      </div>
+    </fieldset>
+
+    <div class="row">
+      <label class="check"><input type="checkbox" id="round_trip"> 왕복</label>
+      <label class="check"><input type="checkbox" id="all_day"> 하루 전체 시간</label>
+      <span style="flex:1"></span>
+      <button type="submit" class="primary" id="btn_search">조회</button>
+      <button type="button" id="btn_watch">이 조건 감시 등록</button>
+    </div>
+    <div class="msg" id="search_msg"></div>
+  </form>
+
+  <div class="results" id="results"></div>
+
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <strong>감시 목록</strong>
+      <span class="muted" id="watch_quota" style="font-size:12px"></span>
+      <span style="flex:1"></span>
+      <button type="button" id="btn_run_now">지금 한 번 점검</button>
+    </div>
+    <div class="wrap" style="margin-top:10px">
+      <table>
+        <thead><tr><th>조건</th><th>좌석</th><th>상태</th><th>마지막 점검</th><th>결과</th><th>알림</th><th></th></tr></thead>
+        <tbody id="watch_body"><tr><td colspan="7" class="muted">등록된 감시가 없습니다.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="msg" id="watch_msg"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtTs = (iso) => iso ? iso.replace('T', ' ') : '-';
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+(function initDates() {
+  const d = new Date(); d.setDate(d.getDate() + 1);
+  $('date').value = d.toISOString().slice(0, 10);
+  d.setDate(d.getDate() + 2);
+  $('ret_date').value = d.toISOString().slice(0, 10);
+})();
+
+// ---------------------------------------------------------------- 역 드롭다운
+async function loadStations() {
+  let data;
+  try { data = await api('/api/stations'); }
+  catch (err) { data = { major: ['서울', '부산'], others: [] }; setMsg($('search_msg'), '역 목록 로드 실패: ' + err.message, true); }
+  for (const id of ['dep', 'arr']) {
+    const sel = $(id); sel.innerHTML = '';
+    const g1 = document.createElement('optgroup'); g1.label = '주요역';
+    for (const n of data.major) g1.appendChild(new Option(n, n));
+    sel.appendChild(g1);
+    if (data.others.length) {
+      const g2 = document.createElement('optgroup'); g2.label = '전체 역 (가나다순)';
+      for (const n of data.others) g2.appendChild(new Option(n, n));
+      sel.appendChild(g2);
+    }
+  }
+  $('dep').value = data.major.includes('서울') ? '서울' : data.major[0];
+  $('arr').value = data.major.includes('부산') ? '부산' : (data.major[1] || data.major[0]);
+}
+$('btn_swap').addEventListener('click', () => {
+  const a = $('dep').value; $('dep').value = $('arr').value; $('arr').value = a;
+});
+
+// ---------------------------------------------------------------- 옵션 토글
+$('round_trip').addEventListener('change', () => { $('ret_box').hidden = !$('round_trip').checked; });
+$('all_day').addEventListener('change', () => {
+  const on = $('all_day').checked;
+  for (const id of ['time_from', 'time_to', 'ret_time_from', 'ret_time_to']) $(id).disabled = on;
+});
+
+// ---------------------------------------------------------------- 요청 조립
+function legPayloads() {
+  const allDay = $('all_day').checked;
+  const base = { train_type: $('train_type').value, seat_pref: $('seat_pref').value };
+  const dep = $('dep').value, arr = $('arr').value;
+  if (!dep || !arr) throw new Error('출발역과 도착역을 선택하세요.');
+  if (dep === arr) throw new Error('출발역과 도착역이 같습니다.');
+  const legs = [{
+    ...base, title: '가는 편', dep, arr, date: $('date').value,
+    time_from: allDay ? null : ($('time_from').value || null),
+    time_to: allDay ? null : ($('time_to').value || null),
+  }];
+  if ($('round_trip').checked) {
+    if (!$('ret_date').value) throw new Error('오는 편 출발일을 입력하세요.');
+    if ($('ret_date').value < $('date').value) throw new Error('오는 편 날짜가 가는 편보다 빠릅니다.');
+    legs.push({
+      ...base, title: '오는 편', dep: arr, arr: dep, date: $('ret_date').value,
+      time_from: allDay ? null : ($('ret_time_from').value || null),
+      time_to: allDay ? null : ($('ret_time_to').value || null),
+    });
+  }
+  for (const l of legs) if (!l.date) throw new Error('출발일을 입력하세요.');
+  return legs;
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (r.status === 401) { location.href = '/login'; throw new Error('로그인이 필요합니다'); }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const d = body.detail;
+    throw new Error(Array.isArray(d) ? d.map(x => x.msg).join(', ') : (d || r.statusText));
+  }
+  return body;
+}
+function setMsg(el, text, err = false) { el.textContent = text; el.className = 'msg' + (err ? ' err' : ''); }
+
+// ---------------------------------------------------------------- 조회
+$('form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  let legs;
+  try { legs = legPayloads(); } catch (err) { setMsg($('search_msg'), err.message, true); return; }
+  $('btn_search').disabled = true;
+  setMsg($('search_msg'), legs.length > 1 ? '가는 편·오는 편 동시 조회 중…' : '조회 중… (코레일 서버 응답을 기다립니다)');
+  $('results').innerHTML = '';
+  const settled = await Promise.allSettled(legs.map(l => api('/api/search', { method: 'POST', body: JSON.stringify(l) })));
+  const box = $('results'); box.className = 'results' + (legs.length > 1 ? ' two' : '');
+  settled.forEach((r, i) => box.appendChild(renderLeg(legs[i], r)));
+  const failed = settled.filter(r => r.status === 'rejected').length;
+  const sent = settled.filter(r => r.status === 'fulfilled' && r.value.telegram_sent).length;
+  const ok = settled.length - failed;
+  let msg = failed ? `${failed}건 조회 실패` : '';
+  if (ok) msg += (msg ? ' · ' : '') + (sent === ok ? '조회 결과를 텔레그램으로 보냈습니다.' : sent ? `텔레그램 ${sent}/${ok}건 전송` : '텔레그램 미전송 (chat_id 미등록)');
+  setMsg($('search_msg'), msg, failed > 0);
+  $('btn_search').disabled = false;
+});
+
+function renderLeg(leg, result) {
+  const card = document.createElement('div'); card.className = 'card';
+  const when = (!leg.time_from && !leg.time_to) ? '전체' : `${leg.time_from || '00:00'}~${leg.time_to || '23:59'}`;
+  const title = `${esc(leg.title)} · ${esc(leg.dep)} → ${esc(leg.arr)} · ${esc(leg.date)} ${esc(when)}`;
+  if (result.status === 'rejected') {
+    card.innerHTML = `<h2>${title}</h2><p class="msg err" style="margin:6px 0 0">${esc(result.reason.message)}</p>`;
+    return card;
+  }
+  const trains = result.value.trains;
+  const avail = trains.filter(t => t.any_available);
+  let html = `<details class="result"><summary><span class="chev">▶</span><h2>${title}</h2>` +
+    `<span class="tag ${avail.length ? 'ok' : 'no'}">${trains.length ? `${trains.length}편 중 빈자리 ${avail.length}편` : '열차 없음'}</span>` +
+    `<span class="muted" style="font-size:12px">펼쳐서 전체 보기</span></summary>`;
+  if (trains.length) {
+    html += '<div class="wrap" style="margin-top:10px"><table><thead><tr><th>열차</th><th>번호</th><th>출발</th><th>도착</th><th>일반실</th><th>특실</th><th>예약대기</th></tr></thead><tbody>';
+    for (const t of trains) {
+      html += `<tr><td>${esc(t.train_type_name)}</td><td>${esc(t.train_no)}</td><td>${esc(t.dep_hhmm)} ${esc(t.dep_name)}</td><td>${esc(t.arr_hhmm)} ${esc(t.arr_name)}</td>` +
+        `<td>${tag(t.general_available)}</td><td>${tag(t.special_available)}</td><td>${t.waiting_list ? '<span class="tag wl">가능</span>' : '<span class="muted">-</span>'}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+  } else {
+    html += '<p class="muted" style="margin:8px 0 0">조건에 맞는 열차가 없습니다.</p>';
+  }
+  html += '</details>';
+  // 접힌 상태에서도 빈자리 열차는 한 줄로 보이게
+  if (avail.length) {
+    const MAX = 12;
+    html += '<p class="avail-line">빈자리: ' + avail.slice(0, MAX).map(t =>
+      `<span class="tag ok">${esc(t.train_type_name)} ${esc(t.train_no)} ${esc(t.dep_hhmm)}${t.general_available ? ' 일반' : ''}${t.special_available ? ' 특실' : ''}</span>`).join(' ') +
+      (avail.length > MAX ? ` <span class="muted">외 ${avail.length - MAX}편 (펼쳐서 보기)</span>` : '') + '</p>';
+  }
+  card.innerHTML = html; return card;
+}
+const tag = (ok) => ok ? '<span class="tag ok">가능</span>' : '<span class="tag no">매진</span>';
+
+// ---------------------------------------------------------------- 감시
+let watchLimit = null, activeWatches = 0;  // null = 무제한
+$('btn_watch').addEventListener('click', async () => {
+  try {
+    const legs = legPayloads();
+    if (watchLimit !== null && activeWatches + legs.length > watchLimit) {
+      throw new Error(`활성 감시는 최대 ${watchLimit}건입니다 (현재 ${activeWatches}건, 등록하려는 ${legs.length}건). 기존 감시를 중지하거나 삭제하세요.`);
+    }
+    for (const l of legs) await api('/api/watches', { method: 'POST', body: JSON.stringify(l) });
+    setMsg($('watch_msg'), `감시 ${legs.length}건을 등록했습니다. 다음 주기부터 점검합니다.`);
+    loadWatches(); loadMe().catch(() => {});
+  } catch (err) { setMsg($('watch_msg'), err.message, true); }
+});
+
+let currentAllowed = true;
+async function loadWatches() {
+  const list = await api('/api/watches');
+  const body = $('watch_body'); body.innerHTML = '';
+  if (!list.length) { body.innerHTML = '<tr><td colspan="7" class="muted">등록된 감시가 없습니다.</td></tr>'; return; }
+  const prefName = { ANY: '일반/특실', GENERAL: '일반실', SPECIAL: '특실' };
+  for (const w of list) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${esc(w.label)}</td><td>${esc(prefName[w.seat_pref] || w.seat_pref)}</td>` +
+      `<td>${w.active ? '<span class="tag ok">감시 중</span>' : '<span class="tag no">중지</span>'}</td>` +
+      `<td>${esc(fmtTs(w.last_checked_at))}</td><td>${esc(w.last_result || '-')}</td><td>${w.notified_count}회</td>` +
+      `<td><button data-act="toggle" data-id="${esc(w.id)}" ${currentAllowed ? '' : 'disabled'}>${w.active ? '중지' : '재개'}</button> <button data-act="del" data-id="${esc(w.id)}">삭제</button></td>`;
+    body.appendChild(tr);
+  }
+}
+$('watch_body').addEventListener('click', async (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  try {
+    if (b.dataset.act === 'del') await api(`/api/watches/${b.dataset.id}`, { method: 'DELETE' });
+    else await api(`/api/watches/${b.dataset.id}/toggle`, { method: 'POST' });
+    setMsg($('watch_msg'), '');
+    loadWatches(); loadMe().catch(() => {});
+  } catch (err) { setMsg($('watch_msg'), err.message, true); }
+});
+
+$('btn_run_now').addEventListener('click', async () => {
+  $('btn_run_now').disabled = true; setMsg($('watch_msg'), '점검 중…');
+  try { await api('/api/watches/run-now', { method: 'POST' }); setMsg($('watch_msg'), '점검 완료'); loadWatches(); loadStatus(); }
+  catch (err) { setMsg($('watch_msg'), err.message, true); }
+  finally { $('btn_run_now').disabled = false; }
+});
+
+// ---------------------------------------------------------------- 내 설정 / 권한
+const TRAIN_BUTTONS = ['btn_search', 'btn_watch', 'btn_run_now', 'btn_korail_test'];
+function applyAllowed(allowed) {
+  $('denied_box').hidden = allowed;
+  for (const id of TRAIN_BUTTONS) $(id).disabled = !allowed;
+  document.querySelectorAll('#watch_body button[data-act="toggle"]').forEach(b => { b.disabled = !allowed; });
+}
+
+async function loadMe() {
+  const m = await api('/api/me');
+  $('who').textContent = m.username + '님';
+  $('admin_link').hidden = !m.is_admin;
+  currentAllowed = !!m.allowed;
+  applyAllowed(currentAllowed);
+  watchLimit = (m.watch_limit === null || m.watch_limit === undefined) ? null : m.watch_limit;
+  activeWatches = m.active_watches || 0;
+  $('watch_quota').textContent = watchLimit === null ? `활성 ${activeWatches}건 · 무제한` : `활성 ${activeWatches}/${watchLimit}건`;
+  if (document.activeElement !== $('s_korail_id')) $('s_korail_id').value = m.korail_id || '';
+  $('s_korail_pw').placeholder = m.korail_pw_set ? '설정됨 · 변경할 때만 입력' : '코레일 비밀번호';
+  // 텔레그램 연결 상태
+  const linked = !!m.telegram_chat_configured;
+  $('tg_linked').hidden = !linked; $('tg_unlinked').hidden = linked;
+  if (linked) {
+    $('tg_linked_name').textContent = (m.telegram_name ? m.telegram_name + ' · ' : '') + 'chat_id ' + m.telegram_chat_id;
+  } else {
+    $('tg_code').textContent = m.telegram_link_code || '------';
+    $('tg_bot_name').textContent = m.telegram_bot_username ? '@' + m.telegram_bot_username : '(서버 봇 미설정)';
+    $('tg_bot_link').href = m.telegram_bot_username ? 'https://t.me/' + m.telegram_bot_username : '#';
+  }
+  if (!linked && !tgWaitTimer) tgWaitTimer = setInterval(() => loadMe().catch(() => {}), 5000);
+  if (linked && tgWaitTimer) { clearInterval(tgWaitTimer); tgWaitTimer = null; }
+  $('settings_hint').textContent = !m.korail_configured ? '· 코레일 계정 미등록' : !linked ? '· 텔레그램 미연결' : '';
+  if (!m.korail_configured || !linked) $('settings_box').open = true;
+}
+let tgWaitTimer = null;
+$('btn_tg_unlink').addEventListener('click', async () => {
+  if (!confirm('텔레그램 연결을 해제하고 새 코드를 받을까요?')) return;
+  try { await api('/api/me/telegram/unlink', { method: 'POST' }); setMsg($('settings_msg'), '연결을 해제했습니다. 새 코드를 봇에게 보내면 다시 연결됩니다.'); loadMe(); loadStatus(); }
+  catch (err) { setMsg($('settings_msg'), err.message, true); }
+});
+$('btn_save_settings').addEventListener('click', async () => {
+  try {
+    await api('/api/me/settings', { method: 'PUT', body: JSON.stringify({
+      korail_id: $('s_korail_id').value, korail_pw: $('s_korail_pw').value || null,
+    }) });
+    $('s_korail_pw').value = '';
+    setMsg($('settings_msg'), '저장했습니다.'); loadMe(); loadStatus();
+  } catch (err) { setMsg($('settings_msg'), err.message, true); }
+});
+$('btn_korail_test').addEventListener('click', async () => {
+  $('btn_korail_test').disabled = true; setMsg($('settings_msg'), '코레일 로그인 시도 중…');
+  try { const r = await api('/api/me/korail/test', { method: 'POST' }); setMsg($('settings_msg'), `코레일 로그인 성공${r.name ? ' (' + r.name + ')' : ''}`); loadStatus(); }
+  catch (err) { setMsg($('settings_msg'), err.message, true); }
+  finally { $('btn_korail_test').disabled = !currentAllowed; }
+});
+$('btn_tg_test').addEventListener('click', async () => {
+  try { await api('/api/telegram/test', { method: 'POST' }); setMsg($('settings_msg'), '텔레그램 테스트 메시지를 보냈습니다.'); }
+  catch (err) { setMsg($('settings_msg'), err.message, true); }
+});
+$('btn_logout').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', { method: 'POST' }); } finally { location.href = '/login'; }
+});
+
+async function loadStatus() {
+  try {
+    const s = await api('/api/status');
+    const dot = (on) => `<span class="dot ${on ? 'on' : 'off'}"></span>`;
+    $('status').innerHTML =
+      `<span>${dot(s.korail_configured)}코레일 계정 ${s.korail_configured ? '등록됨' : '미등록(내 설정)'}</span>` +
+      `<span>${dot(s.korail_logged_in)}코레일 로그인 ${s.korail_logged_in ? '유지 중' : '안 됨'}</span>` +
+      `<span>${dot(s.telegram_bot_configured && s.telegram_chat_configured)}텔레그램 ${!s.telegram_bot_configured ? '봇 미설정(서버)' : s.telegram_chat_configured ? '연결됨' : '미연결 (내 설정에서 코드 전송)'}</span>` +
+      (s.telegram_poll_error ? `<span style="color:var(--no)">텔레그램 수신 오류: ${esc(s.telegram_poll_error)}</span>` : '') +
+      `<span>감시 주기 ${s.poll_interval_sec}초 · 내 감시 ${s.active_watches}건 (전체 ${s.total_active_watches}건, 사용자 ${s.users}명) · 마지막 점검 ${esc(fmtTs(s.last_cycle_at))}</span>` +
+      (s.korail_last_error ? `<span style="color:var(--no)">${esc(s.korail_last_error)}</span>` : '');
+  } catch (err) { $('status').textContent = '상태 조회 실패: ' + err.message; }
+}
+
+loadMe().catch(() => {}); loadStations(); loadStatus(); loadWatches();
+setInterval(() => { loadMe().catch(() => {}); loadStatus(); loadWatches(); }, 30000);
+</script>
+</body>
+</html>
