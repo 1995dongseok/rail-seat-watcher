@@ -16,13 +16,14 @@ from datetime import datetime, timedelta
 from pykorail.device import random_profile
 
 from app import crypto
-from app.config import DATA_DIR, settings
+from app.config import DATA_DIR, settings, write_private
 
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_DAYS = 30
 MIN_POLL_INTERVAL = 30
 MAX_POLL_INTERVAL = 3600
+LINK_CODE_TTL_SEC = 600  # 텔레그램 연결 코드 유효 시간(10분)
 
 
 @dataclass
@@ -35,6 +36,7 @@ class User:
     telegram_chat_id: str = ""
     telegram_name: str = ""  # 연결된 텔레그램 표시 이름(참고용)
     telegram_link_code: str = ""  # 봇에게 보내면 chat_id 가 자동 연결되는 1회용 코드
+    telegram_link_code_at: str = ""  # 코드 발급 시각(ISO). LINK_CODE_TTL_SEC 지나면 무효
     device_profile_id: str = ""
     approved: bool = False  # 관리자가 허용해야 조회/감시 가능. 기본 거부
     watch_limit: int = 2  # 동시에 활성화할 수 있는 감시 수. 관리자는 무제한
@@ -111,12 +113,10 @@ class UserStore:
             self._sessions = {}
 
     def _save_users(self) -> None:
-        USERS_FILE.write_text(
-            json.dumps([asdict(u) for u in self._users.values()], ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        write_private(USERS_FILE, json.dumps([asdict(u) for u in self._users.values()], ensure_ascii=False, indent=2))
 
     def _save_sessions(self) -> None:
-        SESSIONS_FILE.write_text(json.dumps(self._sessions, indent=2), encoding="utf-8")
+        write_private(SESSIONS_FILE, json.dumps(self._sessions, indent=2))
 
     # ------------------------------------------------------------- 사용자
     def count(self) -> int:
@@ -187,9 +187,19 @@ class UserStore:
             return user
 
     # ------------------------------------------------------------- 텔레그램 자동 연결
+    @staticmethod
+    def _code_valid(user: User) -> bool:
+        if not user.telegram_link_code or not user.telegram_link_code_at:
+            return False
+        try:
+            issued = datetime.fromisoformat(user.telegram_link_code_at)
+        except ValueError:
+            return False
+        return (datetime.now() - issued).total_seconds() < LINK_CODE_TTL_SEC
+
     def ensure_link_code(self, user: User) -> str:
-        """연결 코드가 없으면 6자리 숫자 코드를 새로 만든다. 다른 사용자와 겹치지 않게."""
-        if user.telegram_link_code:
+        """유효한 연결 코드가 없거나 만료됐으면 6자리 숫자 코드를 새로 만든다. 다른 사용자와 겹치지 않게."""
+        if self._code_valid(user):
             return user.telegram_link_code
         with self._lock:
             taken = {u.telegram_link_code for u in self._users.values() if u.telegram_link_code}
@@ -198,6 +208,7 @@ class UserStore:
                 if code not in taken:
                     break
             user.telegram_link_code = code
+            user.telegram_link_code_at = datetime.now().isoformat(timespec="seconds")
             self._save_users()
             return code
 
@@ -205,13 +216,15 @@ class UserStore:
         code = code.strip()
         if not code:
             return None
-        return next((u for u in self._users.values() if u.telegram_link_code == code), None)
+        u = next((u for u in self._users.values() if u.telegram_link_code == code), None)
+        return u if u is not None and self._code_valid(u) else None
 
     def link_telegram(self, user: User, chat_id: str, name: str) -> None:
         with self._lock:
             user.telegram_chat_id = str(chat_id)
             user.telegram_name = name[:60]
             user.telegram_link_code = ""
+            user.telegram_link_code_at = ""
             self._save_users()
 
     def unlink_telegram(self, user: User) -> None:

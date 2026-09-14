@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 from app import korail_service, telegram
-from app.config import DATA_DIR, now_kst
+from app.config import DATA_DIR, now_kst, write_private
 from app.korail_service import SearchError, TrainSeat, get_service
 from app.users import user_store
 
@@ -92,10 +92,7 @@ class WatchStore:
             self._watches[w.id] = w
 
     def save(self) -> None:
-        WATCH_FILE.write_text(
-            json.dumps([asdict(w) for w in self._watches.values()], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        write_private(WATCH_FILE, json.dumps([asdict(w) for w in self._watches.values()], ensure_ascii=False, indent=2))
 
     def list(self, user_id: str | None = None) -> list[Watch]:
         items = [w for w in self._watches.values() if user_id is None or w.user_id == user_id]
@@ -254,8 +251,22 @@ class Watcher:
 
     # ------------------------------------------------------------- 부하 예측
     def projected_load(self) -> dict:
-        """현재 활성 감시들이 각자의 주기로 돌 때 코레일로 나가는 예상 호출 수(분당)와 내역."""
+        """현재 활성 감시들이 각자의 주기로 돌 때 코레일로 나가는 예상 호출 수(분당)와 사용자별 내역.
+
+        사용자별 행에는 실측(최근 10분, 감시 + 수동 조회 포함)도 함께 붙인다.
+        """
+        measured = korail_service.calls_by_user_in_last(600)
         per_user: dict[str, dict] = {}
+        for user in user_store.list():
+            per_user[user.id] = {
+                "username": user.username,
+                "allowed": user.allowed,
+                "interval": user.effective_poll_interval,
+                "watches": 0,
+                "calls_per_cycle": 0,
+                "per_min": 0.0,
+                "measured_10min": measured.get(user.id, 0),
+            }
         total = 0.0
         for w in self.store.list():
             if not w.active:
@@ -263,19 +274,22 @@ class Watcher:
             user = user_store.get(w.user_id)
             if user is None or not user.allowed:
                 continue
-            interval = user.effective_poll_interval
             calls = max(1, w.last_calls)  # 아직 점검 전이면 최소 1회로 가정
-            per_min = calls * 60 / interval
+            per_min = calls * 60 / user.effective_poll_interval
             total += per_min
-            row = per_user.setdefault(
-                user.id, {"username": user.username, "interval": interval, "watches": 0, "calls_per_cycle": 0, "per_min": 0.0}
-            )
+            row = per_user[user.id]
             row["watches"] += 1
             row["calls_per_cycle"] += calls
             row["per_min"] += per_min
+        rows = []
         for row in per_user.values():
             row["per_min"] = round(row["per_min"], 1)
-        return {"per_min": round(total, 1), "limit": LOAD_LIMIT_PER_MIN, "users": list(per_user.values())}
+            row["measured_per_min"] = round(row["measured_10min"] / 10, 1)
+            row["share"] = round(row["per_min"] / total * 100) if total else 0
+            if row["watches"] or row["measured_10min"]:
+                rows.append(row)
+        rows.sort(key=lambda r: (-r["per_min"], -r["measured_10min"]))
+        return {"per_min": round(total, 1), "limit": LOAD_LIMIT_PER_MIN, "users": rows}
 
 
 def _format_alert(w: Watch, seats: list[TrainSeat]) -> str:

@@ -56,6 +56,19 @@ settings = Settings(
 )
 
 DATA_DIR.mkdir(exist_ok=True)
+try:
+    os.chmod(DATA_DIR, 0o700)  # 다른 로컬 계정이 사용자 파일을 읽지 못하게. Windows 에서는 무시됨
+except OSError:
+    pass
+
+
+def write_private(path: Path, text: str) -> None:
+    """소유자만 읽을 수 있는 권한(600)으로 파일을 쓴다."""
+    path.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def secret_key() -> bytes:
@@ -70,5 +83,5 @@ def secret_key() -> bytes:
     except FileNotFoundError:
         pass
     key = secrets.token_bytes(32)
-    SECRET_FILE.write_text(key.hex(), encoding="utf-8")
+    write_private(SECRET_FILE, key.hex())
     return key

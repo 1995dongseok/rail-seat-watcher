@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app import telegram
 from app.config import settings
+from app.ratelimit import auth_lock, run_now_limit, search_limit
 from app.korail_service import TRAIN_TYPE_CODES, SearchError, close_all, drop_service, get_service, load_stations
 from app.users import MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, SESSION_DAYS, User, user_store
 from app.watcher import watch_store, watcher
@@ -40,7 +41,20 @@ async def lifespan(_: FastAPI):
     await asyncio.to_thread(close_all)
 
 
-app = FastAPI(title="기차 빈자리 조회", lifespan=lifespan)
+# API 문서(/docs, /openapi.json)는 공개하지 않는다.
+app = FastAPI(title="기차 빈자리 조회", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def client_ip(request: Request) -> str:
+    """Caddy 뒤에 있으므로 X-Forwarded-For 의 첫 주소를 쓴다."""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _is_https(request: Request) -> bool:
+    return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
 
 
 # ----------------------------------------------------------------- 인증
@@ -64,13 +78,27 @@ def admin_user(user: User = Depends(current_user)) -> User:
     return user
 
 
-def _set_cookie(response: Response, token: str) -> None:
-    response.set_cookie(COOKIE, token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax")
+def _set_cookie(request: Request, response: Response, token: str) -> None:
+    response.set_cookie(
+        COOKIE, token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=_is_https(request)
+    )
+
+
+def _check_auth_lock(*keys: str) -> None:
+    for k in keys:
+        remain = auth_lock.locked_for(k)
+        if remain > 0:
+            raise HTTPException(status_code=429, detail=f"시도가 너무 많습니다. {int(remain) + 1}초 뒤에 다시 시도하세요.")
+
+
+def _auth_failed(*keys: str) -> None:
+    for k in keys:
+        auth_lock.record_failure(k)
 
 
 class AuthRequest(BaseModel):
     username: str = Field(min_length=2, max_length=20)
-    password: str = Field(min_length=4, max_length=100)
+    password: str = Field(min_length=1, max_length=100)
     invite_code: str | None = None
 
     @field_validator("username")
@@ -83,25 +111,35 @@ class AuthRequest(BaseModel):
 
 
 @app.post("/api/auth/register", status_code=201)
-async def register(req: AuthRequest, response: Response):
+async def register(req: AuthRequest, request: Request, response: Response):
+    ip = client_ip(request)
+    _check_auth_lock(f"ip:{ip}")
     if not settings.invite_code:
         raise HTTPException(status_code=403, detail="가입이 닫혀 있습니다 (.env 의 INVITE_CODE 미설정)")
     if (req.invite_code or "").strip() != settings.invite_code:
+        _auth_failed(f"ip:{ip}")
         raise HTTPException(status_code=403, detail="초대코드가 올바르지 않습니다")
+    if len(req.password) < 8:
+        raise HTTPException(status_code=422, detail="비밀번호는 8자 이상이어야 합니다")
     try:
         user = user_store.create(req.username, req.password)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    _set_cookie(response, user_store.create_session(user))
+    _set_cookie(request, response, user_store.create_session(user))
     return {"username": user.username}
 
 
 @app.post("/api/auth/login")
-async def login(req: AuthRequest, response: Response):
+async def login(req: AuthRequest, request: Request, response: Response):
+    ip = client_ip(request)
+    ukey = f"user:{req.username.lower()}"
+    _check_auth_lock(f"ip:{ip}", ukey)
     user = user_store.authenticate(req.username, req.password)
     if user is None:
+        _auth_failed(f"ip:{ip}", ukey)
         raise HTTPException(status_code=401, detail="사용자명 또는 비밀번호가 올바르지 않습니다")
-    _set_cookie(response, user_store.create_session(user))
+    auth_lock.reset(ukey)
+    _set_cookie(request, response, user_store.create_session(user))
     return {"username": user.username}
 
 
@@ -390,6 +428,9 @@ def _format_search_result(req: "SearchRequest", seats: list) -> str:
 
 @app.post("/api/search")
 async def search(req: SearchRequest, user: User = Depends(approved_user)):
+    denied = search_limit.check(user.id)
+    if denied:
+        raise HTTPException(status_code=429, detail=denied)
     svc = get_service(user)
     try:
         seats = await asyncio.to_thread(svc.search, req.dep, req.arr, req.date, req.time_from, req.time_to, req.train_type)
@@ -443,6 +484,9 @@ def _own_watch(watch_id: str, user: User):
 
 @app.post("/api/watches/run-now")
 async def run_now(user: User = Depends(approved_user)):
+    denied = run_now_limit.check(user.id)
+    if denied:
+        raise HTTPException(status_code=429, detail="지금 점검은 30초에 한 번만 할 수 있습니다.")
     await watcher.run_once(user.id)
     return {"ok": True}
 

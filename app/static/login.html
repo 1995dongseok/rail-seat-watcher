@@ -48,6 +48,7 @@ function setMode(m) {
   $('tab_register').classList.toggle('on', m === 'register');
   $('invite_row').hidden = m !== 'register';
   $('btn').textContent = m === 'login' ? '로그인' : '가입하고 시작';
+  $('password').placeholder = m === 'login' ? '' : '8자 이상';
   $('password').autocomplete = m === 'login' ? 'current-password' : 'new-password';
   $('msg').textContent = '';
 }

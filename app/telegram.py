@@ -17,13 +17,16 @@ import re
 
 import httpx
 
-from app.config import DATA_DIR, settings
+from app.config import DATA_DIR, settings, write_private
+from app.ratelimit import FailureLock
 
 log = logging.getLogger(__name__)
 
 API = "https://api.telegram.org/bot{token}/{method}"
 OFFSET_FILE = DATA_DIR / "telegram_offset.json"
 CODE_RE = re.compile(r"\b(\d{6})\b")
+# 연결 코드 무차별 대입 방지: 한 채팅에서 10분 안에 5회 틀리면 1시간 동안 무시
+code_lock = FailureLock(max_failures=5, window_sec=600, lock_sec=3600)
 
 bot_username: str = ""  # getMe 로 채움. 화면에서 t.me 링크를 만들 때 사용
 
@@ -83,7 +86,7 @@ class LinkPoller:
 
     def _save_offset(self) -> None:
         try:
-            OFFSET_FILE.write_text(json.dumps({"offset": self._offset}), encoding="utf-8")
+            write_private(OFFSET_FILE, json.dumps({"offset": self._offset}))
         except OSError:
             pass
 
@@ -147,18 +150,27 @@ class LinkPoller:
         if sender.get("username"):
             name = f"{name} (@{sender['username']})".strip()
 
+        key = str(chat_id)
+        if code_lock.locked_for(key) > 0:
+            return  # 틀린 코드를 너무 많이 보낸 채팅은 답장 없이 무시
         if text.startswith("/start"):
-            await send_message(str(chat_id), "기차 빈자리 조회 봇입니다.\n사이트의 '내 설정'에 표시된 6자리 연결 코드를 이 대화에 보내 주세요.")
+            await send_message(key, "기차 빈자리 조회 봇입니다.\n사이트의 '내 설정'에 표시된 6자리 연결 코드를 이 대화에 보내 주세요.")
             return
         m = CODE_RE.search(text)
         if not m:
-            await send_message(str(chat_id), "6자리 연결 코드를 보내 주세요. 코드는 사이트의 '내 설정'에서 확인할 수 있습니다.")
+            await send_message(key, "6자리 연결 코드를 보내 주세요. 코드는 사이트의 '내 설정'에서 확인할 수 있습니다.")
             return
         user = user_store.by_link_code(m.group(1))
         if user is None:
-            await send_message(str(chat_id), "코드를 찾을 수 없습니다. 사이트의 '내 설정'에서 코드를 다시 확인해 주세요.")
+            locked = code_lock.record_failure(key)
+            if locked:
+                log.warning("연결 코드 실패 누적으로 chat %s 를 %d초 동안 무시", key, int(locked))
+                await send_message(key, "잘못된 코드가 반복되어 잠시 후에 다시 시도할 수 있습니다.")
+            else:
+                await send_message(key, "코드를 찾을 수 없거나 만료됐습니다. 사이트의 '내 설정'에서 코드를 다시 확인해 주세요. 코드는 10분마다 바뀝니다.")
             return
-        user_store.link_telegram(user, str(chat_id), name)
+        code_lock.reset(key)
+        user_store.link_telegram(user, key, name)
         log.info("텔레그램 연결: %s <- chat %s (%s)", user.username, chat_id, name)
         await send_message(str(chat_id), f"✅ {user.username}님 계정과 연결되었습니다. 이제 이 대화로 알림이 옵니다.")
 

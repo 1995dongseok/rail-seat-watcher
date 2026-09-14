@@ -45,23 +45,34 @@ MAX_PAGES = 12  # 하루 전체 조회 시 최대 반복 호출 횟수(안전장
 GLOBAL_LOCK = threading.Lock()
 
 # ----------------------------------------------------------------- 호출 통계
-# 코레일로 나간 호출(로그인 + 조회 페이지)의 시각을 기록한다. 관리자 페이지의 부하 표시용.
-_call_log: deque[float] = deque(maxlen=5000)
+# 코레일로 나간 호출(로그인 + 조회 페이지)의 시각과 사용자를 기록한다. 관리자 페이지의 부하 표시용.
+_call_log: deque[tuple[float, str]] = deque(maxlen=5000)
 _call_lock = threading.Lock()
 total_calls = 0
 
 
-def record_call() -> None:
+def record_call(owner_id: str = "") -> None:
     global total_calls
     with _call_lock:
-        _call_log.append(time.monotonic())
+        _call_log.append((time.monotonic(), owner_id))
         total_calls += 1
 
 
 def calls_in_last(seconds: float) -> int:
     cutoff = time.monotonic() - seconds
     with _call_lock:
-        return sum(1 for t in _call_log if t >= cutoff)
+        return sum(1 for t, _ in _call_log if t >= cutoff)
+
+
+def calls_by_user_in_last(seconds: float) -> dict[str, int]:
+    """최근 N초 동안 사용자별 코레일 호출 수(감시 + 수동 조회 모두 포함). 키는 user id."""
+    cutoff = time.monotonic() - seconds
+    out: dict[str, int] = {}
+    with _call_lock:
+        for t, owner in _call_log:
+            if t >= cutoff:
+                out[owner] = out.get(owner, 0) + 1
+    return out
 
 FALLBACK_STATIONS = [
     "서울", "용산", "광명", "수서", "영등포", "수원", "평택", "천안아산", "천안", "오송", "조치원", "대전", "서대전",
@@ -144,10 +155,13 @@ def load_stations() -> list[dict]:
 
 # ----------------------------------------------------------------- 사용자별 서비스
 class KorailService:
-    def __init__(self, korail_id: str, korail_pw: str, device_profile_id: str, owner: str = "") -> None:
+    def __init__(
+        self, korail_id: str, korail_pw: str, device_profile_id: str, owner: str = "", owner_id: str = ""
+    ) -> None:
         self.korail_id = korail_id
         self.korail_pw = korail_pw
         self.owner = owner
+        self.owner_id = owner_id
         self._device_profile = profile_by_id(device_profile_id) or random_profile()
         self._korail: Korail | None = None
         self.last_error: str | None = None
@@ -165,7 +179,7 @@ class KorailService:
             raise SearchError("내 설정에서 코레일 아이디와 비밀번호를 먼저 등록하세요.")
         self.close()
         log.info("[%s] 코레일 로그인 시도", self.owner)
-        record_call()
+        record_call(self.owner_id)
         korail = Korail.logged_in(
             self.korail_id, self.korail_pw, device_profile=self._device_profile, validate_stations=True
         )
@@ -236,7 +250,7 @@ class KorailService:
         results: dict[str, TrainSeat] = {}
         cursor = start
         for _ in range(MAX_PAGES):
-            record_call()
+            record_call(self.owner_id)
             try:
                 trains = self._call(
                     korail.trains.search,
@@ -316,7 +330,7 @@ def get_service(user) -> KorailService:
             svc.close()
             svc = None
         if svc is None:
-            svc = KorailService(user.korail_id, pw, user.device_profile_id, owner=user.username)
+            svc = KorailService(user.korail_id, pw, user.device_profile_id, owner=user.username, owner_id=user.id)
             _registry[user.id] = svc
         return svc
 
