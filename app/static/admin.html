@@ -39,6 +39,20 @@
   </div>
   <p class="muted" style="margin:6px 0 0">신규 가입자는 기본 <b>거부</b> 상태입니다. 허용해야 조회와 감시를 쓸 수 있습니다. 텔레그램은 사용자가 봇에게 연결 코드를 보내면 자동으로 연결되며, 필요하면 여기서 chat_id 를 직접 고칠 수 있습니다.</p>
 
+  <div class="card" id="stats_card">
+    <div class="row" style="margin-top:0">
+      <strong>감시 루프 부하</strong>
+      <span class="muted" style="font-size:12px">서버 IP 하나에서 코레일로 나가는 호출입니다. 분당 30회 아래를 권장합니다.</span>
+    </div>
+    <div class="row" id="stats_main" style="gap:18px; margin-top:8px"><span class="muted">불러오는 중…</span></div>
+    <details style="margin-top:8px">
+      <summary class="muted" style="cursor:pointer; font-size:12px">최근 주기 기록</summary>
+      <div class="wrap" style="margin-top:6px">
+        <table><thead><tr><th>시각</th><th>점검한 감시</th><th>코레일 호출</th><th>소요</th></tr></thead><tbody id="stats_hist"></tbody></table>
+      </div>
+    </details>
+  </div>
+
   <div class="card">
     <div class="wrap">
       <table>
@@ -108,7 +122,33 @@ $('body').addEventListener('click', async (e) => {
   } catch (err) { setMsg(err.message, true); }
 });
 $('btn_logout').addEventListener('click', async () => { try { await api('/api/auth/logout', { method: 'POST' }); } finally { location.href = '/login'; } });
-load().catch(err => setMsg(err.message, true));
+
+async function loadStats() {
+  try {
+    const s = await api('/api/admin/stats');
+    const lc = s.last_cycle, av = s.average;
+    const rateTag = s.calls_per_min >= 30 ? 'no' : 'ok';
+    const box = $('stats_main'); box.innerHTML = '';
+    const item = (label, value) => `<span><span class="muted" style="font-size:12px">${label}</span><br><b>${value}</b></span>`;
+    box.innerHTML =
+      item('주기', `${s.poll_interval_sec}초`) +
+      item('활성 감시', `${s.active_watches}건`) +
+      item('지난 주기', lc ? `감시 ${lc.watches}건 · 호출 ${lc.calls}회 · ${lc.duration_sec}초` : '아직 없음') +
+      item(`평균 (최근 ${av ? av.cycles : 0}주기)`, av ? `호출 ${av.calls}회 · ${av.duration_sec}초` : '-') +
+      item('최근 10분 호출', `<span class="tag ${rateTag}">분당 ${s.calls_per_min}회</span> (${s.calls_last_10min}회)`) +
+      item('시작 후 누적', `${s.total_calls_since_start}회`);
+    const hist = $('stats_hist'); hist.innerHTML = '';
+    for (const h of [...s.history].reverse()) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${esc((h.at || '').replace('T', ' '))}</td><td>${h.watches}건</td><td>${h.calls}회</td><td>${h.duration_sec}초</td>`;
+      hist.appendChild(tr);
+    }
+    if (!s.history.length) hist.innerHTML = '<tr><td colspan="4" class="muted">기록 없음</td></tr>';
+  } catch (err) { $('stats_main').innerHTML = `<span class="msg err" style="margin:0">${esc(err.message)}</span>`; }
+}
+
+load().catch(err => setMsg(err.message, true)); loadStats();
+setInterval(() => { loadStats(); load().catch(() => {}); }, 30000);
 </script>
 </body>
 </html>

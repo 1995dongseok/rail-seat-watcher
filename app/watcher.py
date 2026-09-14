@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-from app import telegram
+from app import korail_service, telegram
 from app.config import DATA_DIR, now_kst, settings
 from app.korail_service import SearchError, TrainSeat, get_service
 from app.users import user_store
@@ -128,6 +130,8 @@ class Watcher:
         self.store = store
         self.last_cycle_at: datetime | None = None
         self.last_cycle_error: str | None = None
+        self.last_cycle: dict | None = None  # {"at", "watches", "calls", "duration_sec"}
+        self.cycle_history: deque[dict] = deque(maxlen=20)
         self._task: asyncio.Task | None = None
         self._running = asyncio.Lock()
 
@@ -158,6 +162,9 @@ class Watcher:
         """활성 감시를 한 바퀴 점검. user_id 를 주면 그 사용자 것만."""
         async with self._running:  # 주기 점검과 '지금 점검'이 겹치지 않게
             today = now_kst().date().isoformat()
+            started = time.monotonic()
+            calls_before = korail_service.total_calls
+            checked = 0
             for w in self.store.list(user_id):
                 if not w.active:
                     continue
@@ -167,10 +174,18 @@ class Watcher:
                     self.store.save()
                     continue
                 await self._check(w)
+                checked += 1
                 await asyncio.sleep(GAP_BETWEEN_WATCHES_SEC)
             if user_id is None:
                 self.last_cycle_at = now_kst()
                 self.last_cycle_error = None
+                self.last_cycle = {
+                    "at": self.last_cycle_at.isoformat(timespec="seconds"),
+                    "watches": checked,
+                    "calls": korail_service.total_calls - calls_before,
+                    "duration_sec": round(time.monotonic() - started, 1),
+                }
+                self.cycle_history.append(self.last_cycle)
 
     async def _check(self, w: Watch) -> None:
         w.last_checked_at = now_kst().isoformat(timespec="seconds")

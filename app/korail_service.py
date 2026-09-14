@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 
@@ -41,6 +43,25 @@ TRAIN_TYPE_CODES: dict[str, str] = {
 
 MAX_PAGES = 12  # 하루 전체 조회 시 최대 반복 호출 횟수(안전장치)
 GLOBAL_LOCK = threading.Lock()
+
+# ----------------------------------------------------------------- 호출 통계
+# 코레일로 나간 호출(로그인 + 조회 페이지)의 시각을 기록한다. 관리자 페이지의 부하 표시용.
+_call_log: deque[float] = deque(maxlen=5000)
+_call_lock = threading.Lock()
+total_calls = 0
+
+
+def record_call() -> None:
+    global total_calls
+    with _call_lock:
+        _call_log.append(time.monotonic())
+        total_calls += 1
+
+
+def calls_in_last(seconds: float) -> int:
+    cutoff = time.monotonic() - seconds
+    with _call_lock:
+        return sum(1 for t in _call_log if t >= cutoff)
 
 FALLBACK_STATIONS = [
     "서울", "용산", "광명", "수서", "영등포", "수원", "평택", "천안아산", "천안", "오송", "조치원", "대전", "서대전",
@@ -144,6 +165,7 @@ class KorailService:
             raise SearchError("내 설정에서 코레일 아이디와 비밀번호를 먼저 등록하세요.")
         self.close()
         log.info("[%s] 코레일 로그인 시도", self.owner)
+        record_call()
         korail = Korail.logged_in(
             self.korail_id, self.korail_pw, device_profile=self._device_profile, validate_stations=True
         )
@@ -214,6 +236,7 @@ class KorailService:
         results: dict[str, TrainSeat] = {}
         cursor = start
         for _ in range(MAX_PAGES):
+            record_call()
             try:
                 trains = self._call(
                     korail.trains.search,

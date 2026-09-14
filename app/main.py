@@ -199,6 +199,33 @@ async def admin_list_users(_: User = Depends(admin_user)):
     return [_admin_row(u) for u in user_store.list()]
 
 
+@app.get("/api/admin/stats")
+async def admin_stats(_: User = Depends(admin_user)):
+    """감시 루프 부하 지표. 관리자가 조회 주기를 정할 때 참고한다."""
+    from app import korail_service
+
+    history = list(watcher.cycle_history)
+    avg = None
+    if history:
+        avg = {
+            "cycles": len(history),
+            "watches": round(sum(h["watches"] for h in history) / len(history), 1),
+            "calls": round(sum(h["calls"] for h in history) / len(history), 1),
+            "duration_sec": round(sum(h["duration_sec"] for h in history) / len(history), 1),
+        }
+    calls_10m = korail_service.calls_in_last(600)
+    return {
+        "poll_interval_sec": settings.poll_interval_sec,
+        "active_watches": sum(1 for w in watch_store.list() if w.active),
+        "last_cycle": watcher.last_cycle,
+        "average": avg,
+        "calls_last_10min": calls_10m,
+        "calls_per_min": round(calls_10m / 10, 1),
+        "total_calls_since_start": korail_service.total_calls,
+        "history": history[-10:],
+    }
+
+
 @app.put("/api/admin/users/{user_id}")
 async def admin_update_user(user_id: str, req: AdminUserUpdate, admin: User = Depends(admin_user)):
     target = user_store.get(user_id)
