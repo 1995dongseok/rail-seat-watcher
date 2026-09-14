@@ -21,6 +21,8 @@ from app.config import DATA_DIR, settings
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 SESSION_DAYS = 30
+MIN_POLL_INTERVAL = 30
+MAX_POLL_INTERVAL = 3600
 
 
 @dataclass
@@ -36,6 +38,7 @@ class User:
     device_profile_id: str = ""
     approved: bool = False  # 관리자가 허용해야 조회/감시 가능. 기본 거부
     watch_limit: int = 2  # 동시에 활성화할 수 있는 감시 수. 관리자는 무제한
+    poll_interval_sec: int = 0  # 이 사용자의 감시 주기(초). 0 이면 서버 기본값(.env)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     @property
@@ -51,6 +54,11 @@ class User:
     def effective_watch_limit(self) -> int | None:
         """None 이면 무제한(관리자)."""
         return None if self.is_admin else max(0, int(self.watch_limit))
+
+    @property
+    def effective_poll_interval(self) -> int:
+        v = int(self.poll_interval_sec or 0) or settings.poll_interval_sec
+        return max(MIN_POLL_INTERVAL, v)
 
     @property
     def korail_pw(self) -> str:
@@ -75,6 +83,7 @@ class User:
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_name": self.telegram_name,
             "watch_limit": self.effective_watch_limit,
+            "poll_interval_sec": self.effective_poll_interval,
             "created_at": self.created_at,
         }
 
@@ -155,9 +164,14 @@ class UserStore:
             return user
 
     def admin_update(
-        self, user: User, approved: bool | None, telegram_chat_id: str | None, watch_limit: int | None = None
+        self,
+        user: User,
+        approved: bool | None,
+        telegram_chat_id: str | None,
+        watch_limit: int | None = None,
+        poll_interval_sec: int | None = None,
     ) -> User:
-        """관리자가 허용/거부, chat_id, 감시 상한을 바꾼다."""
+        """관리자가 허용/거부, chat_id, 감시 상한, 감시 주기를 바꾼다."""
         with self._lock:
             if approved is not None:
                 user.approved = approved
@@ -167,6 +181,8 @@ class UserStore:
                     user.telegram_name = ""
             if watch_limit is not None:
                 user.watch_limit = max(0, int(watch_limit))
+            if poll_interval_sec is not None:
+                user.poll_interval_sec = min(MAX_POLL_INTERVAL, max(MIN_POLL_INTERVAL, int(poll_interval_sec)))
             self._save_users()
             return user
 

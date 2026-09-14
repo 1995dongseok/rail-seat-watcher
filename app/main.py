@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from app import telegram
 from app.config import settings
 from app.korail_service import TRAIN_TYPE_CODES, SearchError, close_all, drop_service, get_service, load_stations
-from app.users import SESSION_DAYS, User, user_store
+from app.users import MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, SESSION_DAYS, User, user_store
 from app.watcher import watch_store, watcher
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -173,6 +173,7 @@ class AdminUserUpdate(BaseModel):
     approved: bool | None = None
     telegram_chat_id: str | None = Field(default=None, max_length=30)
     watch_limit: int | None = Field(default=None, ge=0, le=20)
+    poll_interval_sec: int | None = Field(default=None, ge=MIN_POLL_INTERVAL, le=MAX_POLL_INTERVAL)
 
     @field_validator("telegram_chat_id")
     @classmethod
@@ -215,7 +216,7 @@ async def admin_stats(_: User = Depends(admin_user)):
         }
     calls_10m = korail_service.calls_in_last(600)
     return {
-        "poll_interval_sec": settings.poll_interval_sec,
+        "default_poll_interval_sec": settings.poll_interval_sec,
         "active_watches": sum(1 for w in watch_store.list() if w.active),
         "last_cycle": watcher.last_cycle,
         "average": avg,
@@ -223,6 +224,7 @@ async def admin_stats(_: User = Depends(admin_user)):
         "calls_per_min": round(calls_10m / 10, 1),
         "total_calls_since_start": korail_service.total_calls,
         "history": history[-10:],
+        "projected": watcher.projected_load(),  # {"per_min", "limit", "users": [...]}
     }
 
 
@@ -233,7 +235,7 @@ async def admin_update_user(user_id: str, req: AdminUserUpdate, admin: User = De
         raise HTTPException(status_code=404, detail="사용자가 없습니다")
     if target.is_admin and req.approved is False:
         raise HTTPException(status_code=400, detail="관리자 계정은 거부할 수 없습니다")
-    user_store.admin_update(target, req.approved, req.telegram_chat_id, req.watch_limit)
+    user_store.admin_update(target, req.approved, req.telegram_chat_id, req.watch_limit, req.poll_interval_sec)
     return _admin_row(target)
 
 
@@ -301,7 +303,7 @@ async def status(user: User = Depends(current_user)):
         "telegram_bot_username": telegram.bot_username,
         "telegram_poll_error": telegram.link_poller.last_error,
         "telegram_chat_configured": bool(user.telegram_chat_id),
-        "poll_interval_sec": settings.poll_interval_sec,
+        "poll_interval_sec": user.effective_poll_interval,
         "last_cycle_at": watcher.last_cycle_at.isoformat(timespec="seconds") if watcher.last_cycle_at else None,
         "last_cycle_error": watcher.last_cycle_error,
         "active_watches": sum(1 for w in watch_store.list(user.id) if w.active),

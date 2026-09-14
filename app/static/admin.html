@@ -41,12 +41,24 @@
 
   <div class="card" id="stats_card">
     <div class="row" style="margin-top:0">
-      <strong>감시 루프 부하</strong>
+      <strong>코레일 호출 부하</strong>
       <span class="muted" style="font-size:12px">서버 IP 하나에서 코레일로 나가는 호출입니다. 분당 30회 아래를 권장합니다.</span>
     </div>
-    <div class="row" id="stats_main" style="gap:18px; margin-top:8px"><span class="muted">불러오는 중…</span></div>
+    <div id="load_box" style="margin-top:10px">
+      <div class="row" style="margin-top:0; align-items:baseline">
+        <span style="font-size:26px; font-weight:700" id="load_num">-</span>
+        <span class="muted" id="load_desc">예상 분당 호출 (활성 감시 × 각자 주기 기준)</span>
+        <span style="flex:1"></span>
+        <span id="load_state" class="tag">-</span>
+      </div>
+      <div style="height:12px; background:#eceef1; border-radius:999px; overflow:hidden; margin-top:6px">
+        <div id="load_bar" style="height:100%; width:0; background:var(--ok); transition:width .3s"></div>
+      </div>
+      <div class="muted" id="load_users" style="font-size:12px; margin-top:6px"></div>
+    </div>
+    <div class="row" id="stats_main" style="gap:18px; margin-top:12px"><span class="muted">불러오는 중…</span></div>
     <details style="margin-top:8px">
-      <summary class="muted" style="cursor:pointer; font-size:12px">최근 주기 기록</summary>
+      <summary class="muted" style="cursor:pointer; font-size:12px">최근 점검 기록</summary>
       <div class="wrap" style="margin-top:6px">
         <table><thead><tr><th>시각</th><th>점검한 감시</th><th>코레일 호출</th><th>소요</th></tr></thead><tbody id="stats_hist"></tbody></table>
       </div>
@@ -56,8 +68,8 @@
   <div class="card">
     <div class="wrap">
       <table>
-        <thead><tr><th>사용자</th><th>가입일</th><th>사용</th><th>코레일 계정</th><th>텔레그램 chat_id</th><th>감시 (활성/상한)</th><th></th></tr></thead>
-        <tbody id="body"><tr><td colspan="7" class="muted">불러오는 중…</td></tr></tbody>
+        <thead><tr><th>사용자</th><th>가입일</th><th>사용</th><th>코레일 계정</th><th>텔레그램 chat_id</th><th>감시 (활성/상한)</th><th>감시 주기</th><th></th></tr></thead>
+        <tbody id="body"><tr><td colspan="8" class="muted">불러오는 중…</td></tr></tbody>
       </table>
     </div>
     <div class="msg" id="msg"></div>
@@ -91,10 +103,11 @@ async function load() {
         (u.telegram_name ? `<div class="muted" style="font-size:12px">${esc(u.telegram_name)}</div>` : '') + `</td>` +
       `<td>${u.active_watches}건 / ` + (u.is_admin ? '무제한' :
         `<input data-limit="${esc(u.id)}" type="number" min="0" max="20" value="${u.watch_limit}" style="width:60px"> <button data-act="limit" data-id="${esc(u.id)}">저장</button>`) + `</td>` +
+      `<td><input data-interval="${esc(u.id)}" type="number" min="30" max="3600" step="10" value="${u.poll_interval_sec}" style="width:70px"> 초 <button data-act="interval" data-id="${esc(u.id)}">저장</button></td>` +
       `<td>${u.is_admin ? '' : `<button class="danger" data-act="del" data-id="${esc(u.id)}" data-name="${esc(u.username)}">삭제</button>`}</td>`;
     body.appendChild(tr);
   }
-  if (!users.length) body.innerHTML = '<tr><td colspan="7" class="muted">사용자가 없습니다.</td></tr>';
+  if (!users.length) body.innerHTML = '<tr><td colspan="8" class="muted">사용자가 없습니다.</td></tr>';
 }
 
 $('body').addEventListener('click', async (e) => {
@@ -113,6 +126,11 @@ $('body').addEventListener('click', async (e) => {
       if (Number.isNaN(v) || v < 0 || v > 20) throw new Error('감시 상한은 0~20 사이 숫자여야 합니다.');
       await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ watch_limit: v }) });
       setMsg('감시 상한을 저장했습니다.');
+    } else if (b.dataset.act === 'interval') {
+      const v = parseInt(document.querySelector(`input[data-interval="${id}"]`).value, 10);
+      if (Number.isNaN(v) || v < 30 || v > 3600) throw new Error('감시 주기는 30~3600초 사이여야 합니다.');
+      await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ poll_interval_sec: v }) });
+      setMsg('감시 주기를 저장했습니다. 다음 점검부터 적용됩니다.'); loadStats();
     } else if (b.dataset.act === 'del') {
       if (!confirm(`${b.dataset.name} 사용자와 그 감시 목록을 삭제할까요?`)) return;
       await api(`/api/admin/users/${id}`, { method: 'DELETE' });
@@ -126,16 +144,29 @@ $('btn_logout').addEventListener('click', async () => { try { await api('/api/au
 async function loadStats() {
   try {
     const s = await api('/api/admin/stats');
-    const lc = s.last_cycle, av = s.average;
-    const rateTag = s.calls_per_min >= 30 ? 'no' : 'ok';
+    const lc = s.last_cycle, av = s.average, p = s.projected;
+    // 예상 부하 게이지: 활성 감시 × 각자 주기로 계산
+    const ratio = p.limit ? p.per_min / p.limit : 0;
+    const color = ratio >= 1 ? 'var(--no)' : ratio >= 0.67 ? '#d99a00' : 'var(--ok)';
+    const state = ratio >= 1 ? ['no', '과부하'] : ratio >= 0.67 ? ['', '주의'] : ['ok', '여유'];
+    $('load_num').innerHTML = `${p.per_min} <span class="muted" style="font-size:15px; font-weight:400">/ ${p.limit} 회/분</span>`;
+    $('load_bar').style.width = Math.min(100, ratio * 100) + '%';
+    $('load_bar').style.background = color;
+    $('load_state').className = 'tag ' + state[0];
+    $('load_state').textContent = state[1];
+    if (state[0] === '') { $('load_state').style.background = '#fff4d6'; $('load_state').style.color = '#8a5a00'; } else { $('load_state').style.background = ''; $('load_state').style.color = ''; }
+    $('load_users').textContent = p.users.length
+      ? p.users.map(u => `${u.username}: 감시 ${u.watches}건 · 주기 ${u.interval}초 · 분당 ${u.per_min}회`).join('  |  ')
+      : '활성 감시 없음';
+    const rateTag = s.calls_per_min >= p.limit ? 'no' : 'ok';
     const box = $('stats_main'); box.innerHTML = '';
     const item = (label, value) => `<span><span class="muted" style="font-size:12px">${label}</span><br><b>${value}</b></span>`;
     box.innerHTML =
-      item('주기', `${s.poll_interval_sec}초`) +
+      item('기본 주기', `${s.default_poll_interval_sec}초`) +
       item('활성 감시', `${s.active_watches}건`) +
-      item('지난 주기', lc ? `감시 ${lc.watches}건 · 호출 ${lc.calls}회 · ${lc.duration_sec}초` : '아직 없음') +
-      item(`평균 (최근 ${av ? av.cycles : 0}주기)`, av ? `호출 ${av.calls}회 · ${av.duration_sec}초` : '-') +
-      item('최근 10분 호출', `<span class="tag ${rateTag}">분당 ${s.calls_per_min}회</span> (${s.calls_last_10min}회)`) +
+      item('마지막 점검', lc ? `감시 ${lc.watches}건 · 호출 ${lc.calls}회 · ${lc.duration_sec}초` : '아직 없음') +
+      item(`평균 (최근 ${av ? av.cycles : 0}회)`, av ? `호출 ${av.calls}회 · ${av.duration_sec}초` : '-') +
+      item('실측 최근 10분', `<span class="tag ${rateTag}">분당 ${s.calls_per_min}회</span> (${s.calls_last_10min}회)`) +
       item('시작 후 누적', `${s.total_calls_since_start}회`);
     const hist = $('stats_hist'); hist.innerHTML = '';
     for (const h of [...s.history].reverse()) {
