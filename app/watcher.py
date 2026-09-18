@@ -18,9 +18,10 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-from app import korail_service, telegram
+from app import korail_service, nol_service, telegram
 from app.config import DATA_DIR, now_kst, write_private
 from app.korail_service import SearchError, TrainSeat, get_service
+from app.nol_service import NolError, SeatGrade
 from app.users import user_store
 
 log = logging.getLogger(__name__)
@@ -29,19 +30,27 @@ WATCH_FILE = DATA_DIR / "watches.json"
 GAP_BETWEEN_WATCHES_SEC = 3
 TICK_SEC = 10  # 루프가 깨어나 '점검할 때가 된 감시'를 찾는 간격
 LOAD_LIMIT_PER_MIN = 30  # 서버 IP 하나에서 코레일로 나가는 호출의 권장 상한(분당)
+NOL_LOAD_LIMIT_PER_MIN = 60  # NOL 티켓 호출 권장 상한(분당). 로그인 없는 조회지만 같은 IP 에서 몰리면 차단될 수 있다
 
 
 @dataclass
 class Watch:
     id: str
     user_id: str
-    dep: str
-    arr: str
-    date: str  # YYYY-MM-DD
-    time_from: str | None  # HH:MM 또는 None(전체)
-    time_to: str | None
+    date: str  # YYYY-MM-DD. 기차는 출발일, 공연은 관람일. 지나면 감시 종료
+    kind: str = "korail"  # korail(기차) / nol(NOL 티켓 공연)
+    # --- 기차(korail)
+    dep: str = ""
+    arr: str = ""
+    time_from: str | None = None  # HH:MM 또는 None(전체)
+    time_to: str | None = None
     train_type: str = "ALL"
     seat_pref: str = "ANY"  # ANY / GENERAL / SPECIAL
+    # --- 공연(nol)
+    goods_code: str = ""
+    goods_name: str = ""
+    play_seq: str = ""  # 특정 회차만. 비어 있으면 그 날짜의 모든 회차
+    grades: list[str] = field(default_factory=list)  # 알림 대상 등급명. 비어 있으면 전체 등급
     active: bool = True
     created_at: str = field(default_factory=lambda: now_kst().isoformat(timespec="seconds"))
     last_checked_at: str | None = None
@@ -50,9 +59,23 @@ class Watch:
     available_keys: list[str] = field(default_factory=list)
     notified_count: int = 0
 
+    @property
+    def is_nol(self) -> bool:
+        return self.kind == "nol"
+
     def label(self) -> str:
+        if self.is_nol:
+            seq = f" {self.play_seq}회차" if self.play_seq else ""
+            return f"🎫 {self.goods_name or self.goods_code} {self.date}{seq}"
         when = "전체" if not self.time_from and not self.time_to else f"{self.time_from or '00:00'}~{self.time_to or '23:59'}"
         return f"{self.dep}→{self.arr} {self.date} {when} {self.train_type}"
+
+    def matches_grade(self, seat: SeatGrade) -> bool:
+        if self.play_seq and seat.play_seq != self.play_seq:
+            return False
+        if self.grades and seat.grade_name not in self.grades:
+            return False
+        return seat.available
 
     def matches(self, seat: TrainSeat) -> bool:
         if self.seat_pref == "GENERAL":
@@ -85,6 +108,7 @@ class WatchStore:
             return
         for item in raw:
             item.setdefault("user_id", "")
+            item.pop("label", None)
             try:
                 w = Watch(**item)
             except TypeError:
@@ -101,8 +125,12 @@ class WatchStore:
     def get(self, watch_id: str) -> Watch | None:
         return self._watches.get(watch_id)
 
-    def active_count(self, user_id: str) -> int:
-        return sum(1 for w in self._watches.values() if w.user_id == user_id and w.active)
+    def active_count(self, user_id: str, kind: str | None = None) -> int:
+        """활성 감시 수. kind 를 주면 그 종류(korail/nol)만."""
+        return sum(
+            1 for w in self._watches.values()
+            if w.user_id == user_id and w.active and (kind is None or w.kind == kind)
+        )
 
     def add(self, **kwargs) -> Watch:
         w = Watch(id=uuid.uuid4().hex[:8], **kwargs)
@@ -190,14 +218,18 @@ class Watcher:
             today = now_kst().date().isoformat()
             started = time.monotonic()
             calls_before = korail_service.total_calls
+            nol_before = nol_service.total_calls
             checked = 0
             for w in watches:
                 if w.date < today:
                     w.active = False
-                    w.last_result = "출발일 경과로 감시 종료"
+                    w.last_result = "관람일 경과로 감시 종료" if w.is_nol else "출발일 경과로 감시 종료"
                     self.store.save()
                     continue
-                await self._check(w)
+                if w.is_nol:
+                    await self._check_nol(w)
+                else:
+                    await self._check(w)
                 checked += 1
                 await asyncio.sleep(GAP_BETWEEN_WATCHES_SEC)
             if checked:
@@ -207,6 +239,7 @@ class Watcher:
                     "at": self.last_cycle_at.isoformat(timespec="seconds"),
                     "watches": checked,
                     "calls": korail_service.total_calls - calls_before,
+                    "nol_calls": nol_service.total_calls - nol_before,
                     "duration_sec": round(time.monotonic() - started, 1),
                 }
                 self.cycle_history.append(self.last_cycle)
@@ -249,6 +282,49 @@ class Watcher:
                 w.notified_count += 1
                 self.store.save()
 
+    async def _check_nol(self, w: Watch) -> None:
+        """NOL 티켓 공연: 관람일 하루치 잔여석(회차 × 등급)을 한 번에 받아 0 -> 1 이상으로 바뀐 것을 알린다."""
+        w.last_checked_at = now_kst().isoformat(timespec="seconds")
+        user = user_store.get(w.user_id)
+        if user is None:
+            w.active = False
+            w.last_result = "소유자 없음, 감시 종료"
+            self.store.save()
+            return
+        if not user.allowed:
+            w.last_result = "사용 거부 상태라 점검 건너뜀 (관리자 승인 필요)"
+            self.store.save()
+            return
+        calls_before = nol_service.total_calls
+        try:
+            seats = await asyncio.to_thread(nol_service.remaining_by_date, w.goods_code, w.date, user.id)
+        except NolError as e:
+            w.last_calls = nol_service.total_calls - calls_before
+            w.last_result = f"조회 실패: {e}"
+            self.store.save()
+            return
+        w.last_calls = nol_service.total_calls - calls_before
+
+        if w.play_seq:
+            seats = [s for s in seats if s.play_seq == w.play_seq]
+        now_available = {s.key: s for s in seats if w.matches_grade(s)}
+        newly = [s for k, s in now_available.items() if k not in set(w.available_keys)]
+        w.available_keys = sorted(now_available.keys())
+        if not seats:
+            w.last_result = "그 날짜에 회차가 없거나 예매가 닫혔습니다"
+        else:
+            w.last_result = f"{len(seats)}개 등급 조회, 잔여 {sum(s.remain for s in now_available.values())}석"
+        self.store.save()
+
+        if newly:
+            if not user.telegram_chat_id:
+                w.last_result += " (텔레그램 미연결으로 알림 생략)"
+                self.store.save()
+                return
+            if await telegram.send_message(user.telegram_chat_id, _format_nol_alert(w, newly)):
+                w.notified_count += 1
+                self.store.save()
+
     # ------------------------------------------------------------- 부하 예측
     def projected_load(self) -> dict:
         """현재 활성 감시들이 각자의 주기로 돌 때 코레일로 나가는 예상 호출 수(분당)와 사용자별 내역.
@@ -256,6 +332,7 @@ class Watcher:
         사용자별 행에는 실측(최근 10분, 감시 + 수동 조회 포함)도 함께 붙인다.
         """
         measured = korail_service.calls_by_user_in_last(600)
+        nol_measured = nol_service.calls_by_user_in_last(600)
         per_user: dict[str, dict] = {}
         for user in user_store.list():
             per_user[user.id] = {
@@ -266,8 +343,12 @@ class Watcher:
                 "calls_per_cycle": 0,
                 "per_min": 0.0,
                 "measured_10min": measured.get(user.id, 0),
+                "nol_watches": 0,
+                "nol_per_min": 0.0,
+                "nol_measured_10min": nol_measured.get(user.id, 0),
             }
         total = 0.0
+        nol_total = 0.0
         for w in self.store.list():
             if not w.active:
                 continue
@@ -276,20 +357,34 @@ class Watcher:
                 continue
             calls = max(1, w.last_calls)  # 아직 점검 전이면 최소 1회로 가정
             per_min = calls * 60 / user.effective_poll_interval
-            total += per_min
             row = per_user[user.id]
+            if w.is_nol:
+                nol_total += per_min
+                row["nol_watches"] += 1
+                row["nol_per_min"] += per_min
+                continue
+            total += per_min
             row["watches"] += 1
             row["calls_per_cycle"] += calls
             row["per_min"] += per_min
         rows = []
         for row in per_user.values():
             row["per_min"] = round(row["per_min"], 1)
+            row["nol_per_min"] = round(row["nol_per_min"], 1)
             row["measured_per_min"] = round(row["measured_10min"] / 10, 1)
+            row["nol_measured_per_min"] = round(row["nol_measured_10min"] / 10, 1)
             row["share"] = round(row["per_min"] / total * 100) if total else 0
-            if row["watches"] or row["measured_10min"]:
+            if row["watches"] or row["measured_10min"] or row["nol_watches"] or row["nol_measured_10min"]:
                 rows.append(row)
-        rows.sort(key=lambda r: (-r["per_min"], -r["measured_10min"]))
-        return {"per_min": round(total, 1), "limit": LOAD_LIMIT_PER_MIN, "users": rows}
+        rows.sort(key=lambda r: (-r["per_min"], -r["nol_per_min"], -r["measured_10min"]))
+        return {
+            "per_min": round(total, 1),
+            "limit": LOAD_LIMIT_PER_MIN,
+            "users": rows,
+            "nol_per_min": round(nol_total, 1),
+            "nol_limit": NOL_LOAD_LIMIT_PER_MIN,
+            "nol_measured_per_min": round(nol_service.calls_in_last(600) / 10, 1),
+        }
 
 
 def _format_alert(w: Watch, seats: list[TrainSeat]) -> str:
@@ -299,6 +394,14 @@ def _format_alert(w: Watch, seats: list[TrainSeat]) -> str:
         spe = "특실 O" if s.special_available else "특실 X"
         lines.append(f"- {s.train_type_name} {s.train_no}  {s.dep_time[:2]}:{s.dep_time[2:4]}→{s.arr_time[:2]}:{s.arr_time[2:4]}  {gen} / {spe}")
     lines.append("예매: https://www.korail.com")
+    return "\n".join(lines)
+
+
+def _format_nol_alert(w: Watch, seats: list[SeatGrade]) -> str:
+    lines = [f"🎫 취소표 발생: {w.goods_name or w.goods_code} {w.date}"]
+    for s in seats:
+        lines.append(f"- {s.play_seq}회차 {s.grade_name}  잔여 {s.remain}석")
+    lines.append(f"예매: {nol_service.PRODUCT_URL.format(code=w.goods_code)}")
     return "\n".join(lines)
 
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>기차 빈자리 조회</title>
+<title>빈자리 알리미</title>
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --line:#e3e6ea; --text:#1d2430; --muted:#6b7480; --ok:#158a4a; --ok-bg:#e6f6ec; --no:#b42323; --no-bg:#fbe9e9; --accent:#0b5fb3; }
   * { box-sizing:border-box; }
@@ -50,21 +50,26 @@
   details.result[open] > summary .chev { transform:rotate(90deg); }
   .avail-line { font-size:12px; color:var(--muted); margin:6px 0 0; line-height:1.8; }
   .avail-line .tag { margin-right:4px; }
+  .tabs { display:flex; gap:6px; margin:4px 0 12px; border-bottom:1px solid var(--line); }
+  .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; background:none; padding:8px 14px; font-size:15px; color:var(--muted); margin-bottom:-1px; }
+  .tabs button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .chips button { padding:4px 10px; font-size:12px; border-radius:999px; }
 </style>
 </head>
 <body>
 <main>
   <div class="row" style="margin:0 0 4px; align-items:baseline">
-    <h1 style="margin:0">기차 빈자리 조회</h1>
+    <h1 style="margin:0">빈자리 알리미</h1>
     <span style="flex:1"></span>
     <span class="muted" id="who"></span>
     <a href="/admin" id="admin_link" hidden style="color:var(--accent)">관리자</a>
     <button type="button" id="btn_logout">로그아웃</button>
   </div>
-  <p class="sub">코레일 계정으로 특정 날짜·시간·노선의 잔여석을 조회하고, 조회 결과와 빈자리 알림을 텔레그램으로 보냅니다.</p>
+  <p class="sub">기차 잔여석과 공연 취소표를 조회하고, 조건을 감시로 등록해 두면 빈자리가 생겼을 때 텔레그램으로 알려 줍니다.</p>
 
   <div class="card" id="denied_box" hidden style="background:var(--no-bg); border-color:#f0c2c2; color:var(--no)">
-    <strong>관리자 승인 대기 중입니다.</strong> 승인 전에는 기차 조회와 감시 기능을 사용할 수 없습니다. 내 설정에서 코레일 계정은 미리 등록해 둘 수 있습니다.
+    <strong>관리자 승인 대기 중입니다.</strong> 승인 전에는 조회와 감시 기능을 사용할 수 없습니다. 내 설정에서 텔레그램 연결과 코레일 계정은 미리 해 둘 수 있습니다.
   </div>
 
   <div class="card">
@@ -72,8 +77,9 @@
   </div>
 
   <details class="card" id="settings_box">
-    <summary style="cursor:pointer; font-weight:600">내 설정 (코레일 계정 · 텔레그램) <span class="muted" id="settings_hint" style="font-weight:400; font-size:12px"></span></summary>
-    <div class="grid" style="margin-top:12px">
+    <summary style="cursor:pointer; font-weight:600">내 설정 (텔레그램 알림 · 코레일 계정) <span class="muted" id="settings_hint" style="font-weight:400; font-size:12px"></span></summary>
+    <div class="muted" style="font-size:12px; margin-top:8px">코레일 계정은 <b>기차</b> 조회에만 필요합니다. 공연 취소표는 계정 없이 조회됩니다.</div>
+    <div class="grid" style="margin-top:8px">
       <div><label>코레일 아이디 (이메일/휴대폰/회원번호)</label><input id="s_korail_id" autocomplete="off"></div>
       <div><label>코레일 비밀번호</label><input id="s_korail_pw" type="password" autocomplete="new-password" placeholder="변경할 때만 입력"></div>
     </div>
@@ -106,6 +112,12 @@
     </div>
   </details>
 
+  <div class="tabs" id="tabs">
+    <button type="button" data-tab="train" class="on">🚄 기차</button>
+    <button type="button" data-tab="show">🎫 공연</button>
+  </div>
+
+  <section id="tab_train">
   <form class="card" id="form">
     <div class="route">
       <div><label>출발역</label><select id="dep" required></select></div>
@@ -161,6 +173,52 @@
   </form>
 
   <div class="results" id="results"></div>
+  </section>
+
+  <section id="tab_show" hidden>
+  <form class="card" id="nol_form">
+    <div class="row" style="margin-top:0; align-items:baseline">
+      <strong>공연 취소표 (NOL 티켓)</strong>
+      <span class="muted" style="font-size:12px">NOL 티켓(구 인터파크)에서 지금 판매 중인 공연의 회차·등급별 잔여석을 조회하고, 취소표가 생기면 텔레그램으로 알립니다. 조회만 하며 예매는 직접 해야 합니다.</span>
+    </div>
+    <div class="grid" style="margin-top:12px">
+      <div style="grid-column:1 / -1">
+        <label>공연 검색 (공연명·아티스트·장르, 또는 NOL 상품코드/주소)</label>
+        <div style="display:flex; gap:6px">
+          <input id="nol_q" placeholder="예: 적재, 김동률, 뮤지컬" autocomplete="off">
+          <button type="button" id="btn_nol_search" style="white-space:nowrap">검색</button>
+        </div>
+        <div class="row" style="margin-top:6px; gap:10px">
+          <div class="chips" id="nol_chips" style="margin-top:0">
+            <span class="muted" style="font-size:12px; align-self:center">진행 중인 공연 보기:</span>
+            <button type="button" data-q="콘서트">콘서트</button>
+            <button type="button" data-q="뮤지컬">뮤지컬</button>
+            <button type="button" data-q="연극">연극</button>
+            <button type="button" data-q="페스티벌">페스티벌</button>
+            <button type="button" data-q="팬미팅">팬미팅</button>
+          </div>
+          <span style="flex:1"></span>
+          <label class="check"><input type="checkbox" id="nol_upcoming"> 판매 예정 공연도 포함</label>
+        </div>
+      </div>
+      <div style="grid-column:1 / -1"><label>공연 <span class="muted" id="nol_count"></span></label><select id="nol_goods"><option value="">먼저 검색하세요</option></select></div>
+    </div>
+    <div class="muted" id="nol_goods_info" style="font-size:12px; margin-top:6px"></div>
+    <div class="grid" style="margin-top:12px">
+      <div><label>관람일</label><select id="nol_date" disabled><option value="">공연을 선택하세요</option></select></div>
+      <div><label>회차</label><select id="nol_seq"><option value="">전체 회차</option></select></div>
+      <div><label>알림 대상 등급</label><select id="nol_grade"><option value="">전체 등급</option></select></div>
+    </div>
+    <div class="row">
+      <span class="muted" style="font-size:12px">회차·등급 목록은 조회하면 채워집니다. 감시는 관람일 하루 단위로 등록됩니다.</span>
+      <span style="flex:1"></span>
+      <button type="submit" class="primary" id="btn_nol_seats">조회</button>
+      <button type="button" id="btn_nol_watch">이 조건 감시 등록</button>
+    </div>
+    <div class="msg" id="nol_msg"></div>
+    <div id="nol_results"></div>
+  </form>
+  </section>
 
   <div class="card">
     <div class="row" style="margin-top:0">
@@ -247,7 +305,11 @@ function legPayloads() {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  let r;
+  try { r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts }); }
+  catch (e) {  // 'Failed to fetch': 서버가 응답을 주지 못함(꺼짐·재시작 중·연결 끊김·차단 프로그램)
+    throw new Error('서버에 연결하지 못했습니다. 서버가 꺼졌거나 재시작 중이거나, 네트워크나 차단 프로그램이 요청을 막았을 수 있습니다. 잠시 후 다시 시도하세요. (' + (e && e.message) + ')');
+  }
   if (r.status === 401) { location.href = '/login'; throw new Error('로그인이 필요합니다'); }
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
@@ -314,12 +376,13 @@ function renderLeg(leg, result) {
 const tag = (ok) => ok ? '<span class="tag ok">가능</span>' : '<span class="tag no">매진</span>';
 
 // ---------------------------------------------------------------- 감시
-let watchLimit = null, activeWatches = 0;  // null = 무제한
+let watchLimit = null, activeWatches = 0;  // 기차. null = 무제한
+let nolWatchLimit = null, activeNolWatches = 0;  // 공연
 $('btn_watch').addEventListener('click', async () => {
   try {
     const legs = legPayloads();
     if (watchLimit !== null && activeWatches + legs.length > watchLimit) {
-      throw new Error(`활성 감시는 최대 ${watchLimit}건입니다 (현재 ${activeWatches}건, 등록하려는 ${legs.length}건). 기존 감시를 중지하거나 삭제하세요.`);
+      throw new Error(`활성 기차 감시는 최대 ${watchLimit}건입니다 (현재 ${activeWatches}건, 등록하려는 ${legs.length}건). 기존 기차 감시를 중지하거나 삭제하세요.`);
     }
     for (const l of legs) await api('/api/watches', { method: 'POST', body: JSON.stringify(l) });
     setMsg($('watch_msg'), `감시 ${legs.length}건을 등록했습니다. 다음 주기부터 점검합니다.`);
@@ -335,7 +398,8 @@ async function loadWatches() {
   const prefName = { ANY: '일반/특실', GENERAL: '일반실', SPECIAL: '특실' };
   for (const w of list) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${esc(w.label)}</td><td>${esc(prefName[w.seat_pref] || w.seat_pref)}</td>` +
+    const seat = w.kind === 'nol' ? ((w.grades || []).length ? w.grades.join(', ') : '전체 등급') : (prefName[w.seat_pref] || w.seat_pref);
+    tr.innerHTML = `<td>${esc(w.label)}</td><td>${esc(seat)}</td>` +
       `<td>${w.active ? '<span class="tag ok">감시 중</span>' : '<span class="tag no">중지</span>'}</td>` +
       `<td>${esc(fmtTs(w.last_checked_at))}</td><td>${esc(w.last_result || '-')}</td><td>${w.notified_count}회</td>` +
       `<td><button data-act="toggle" data-id="${esc(w.id)}" ${currentAllowed ? '' : 'disabled'}>${w.active ? '중지' : '재개'}</button> <button data-act="del" data-id="${esc(w.id)}">삭제</button></td>`;
@@ -359,8 +423,135 @@ $('btn_run_now').addEventListener('click', async () => {
   finally { $('btn_run_now').disabled = false; }
 });
 
+// ---------------------------------------------------------------- 탭 (기차 / 공연)
+function showTab(name) {
+  $('tab_train').hidden = name !== 'train';
+  $('tab_show').hidden = name !== 'show';
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  try { localStorage.setItem('tab', name); } catch (e) {}
+}
+$('tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
+(function initTab() { let t = 'train'; try { t = localStorage.getItem('tab') || 'train'; } catch (e) {} showTab(t === 'show' ? 'show' : 'train'); })();
+
+// ---------------------------------------------------------------- 공연 (NOL 티켓)
+let nolGoods = null;  // 선택된 공연 요약
+$('btn_nol_search').addEventListener('click', () => nolSearch());
+$('nol_q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nolSearch(); } });
+$('nol_chips').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) { $('nol_q').value = b.dataset.q; nolSearch(); } });
+async function nolSearch() {
+  const q = $('nol_q').value.trim();
+  if (q.length < 2) { setMsg($('nol_msg'), '검색어를 2자 이상 입력하세요.', true); return; }
+  const upcoming = $('nol_upcoming').checked;
+  $('btn_nol_search').disabled = true; setMsg($('nol_msg'), '검색 중…');
+  try {
+    const r = await api('/api/nol/search?q=' + encodeURIComponent(q) + (upcoming ? '&upcoming=1' : ''));
+    const sel = $('nol_goods'); sel.innerHTML = '';
+    $('nol_count').textContent = '';
+    if (!r.items.length) {
+      sel.appendChild(new Option('검색 결과 없음', '')); nolGoods = null; fillNolDates();
+      setMsg($('nol_msg'), upcoming ? '판매 중·판매 예정인 공연이 없습니다.' : '지금 판매 중인 공연이 없습니다. "판매 예정 공연도 포함"을 켜고 다시 검색해 보세요.', true);
+      return;
+    }
+    for (const it of r.items) sel.appendChild(new Option(`${it.title} · ${it.date_info}${it.place ? ' · ' + it.place : ''}`, it.code));
+    $('nol_count').textContent = `· ${r.items.length}건${r.items.length >= 20 ? ' (검색어를 더 구체적으로 넣으면 좁혀집니다)' : ''}`;
+    setMsg($('nol_msg'), `${upcoming ? '판매 중·판매 예정' : '판매 중'} 공연 ${r.items.length}건. 공연을 고르고 관람일을 선택하세요.`);
+    await loadNolGoods(sel.value);
+  } catch (err) { setMsg($('nol_msg'), err.message, true); }
+  finally { $('btn_nol_search').disabled = !currentAllowed; }
+}
+$('nol_goods').addEventListener('change', () => loadNolGoods($('nol_goods').value).catch(err => setMsg($('nol_msg'), err.message, true)));
+async function loadNolGoods(code) {
+  nolGoods = null; $('nol_goods_info').textContent = ''; resetNolOptions();
+  if (!code) { fillNolDates(); return; }
+  nolGoods = await api('/api/nol/goods/' + encodeURIComponent(code));
+  $('nol_goods_info').innerHTML = `${esc(nolGoods.place)} · 공연 ${esc(nolGoods.play_start)}~${esc(nolGoods.play_end)}` +
+    (nolGoods.booking_end ? ` · 예매 마감 ${esc(nolGoods.booking_end)}` : '') +
+    ` · <a href="${esc(nolGoods.url)}" target="_blank" rel="noopener">NOL 에서 보기</a>`;
+  fillNolDates();
+}
+function fillNolDates() {
+  const sel = $('nol_date'); sel.innerHTML = '';
+  if (!nolGoods || !nolGoods.play_start || !nolGoods.play_end) { sel.disabled = true; sel.appendChild(new Option('공연을 선택하세요', '')); return; }
+  // 날짜는 모두 로컬(브라우저) 기준으로 다룬다. toISOString 은 UTC 라 하루가 어긋난다.
+  const localDate = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+  const localYmd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const start = localDate(nolGoods.play_start), end = localDate(nolGoods.play_end);
+  const from = start > today ? start : today;
+  const dow = ['일', '월', '화', '수', '목', '금', '토'];
+  let n = 0;
+  sel.appendChild(new Option(`남은 기간 전체 조회 (최대 ${nolGoods.max_scan_days}일)`, ''));
+  for (let d = new Date(from); d <= end; d.setDate(d.getDate() + 1)) {
+    const ymd = localYmd(d);
+    const times = (nolGoods.show_times || {})[ymd];
+    if (Object.keys(nolGoods.show_times || {}).length && !times) continue;  // 안내문에 시각이 있으면 공연 없는 날은 숨김
+    sel.appendChild(new Option(`${ymd} (${dow[d.getDay()]})${times ? ' ' + times.join(', ') : ''}`, ymd));
+    n++;
+  }
+  sel.disabled = false;
+  if (n === 1) sel.selectedIndex = 1;
+  if (!n) { sel.innerHTML = ''; sel.appendChild(new Option('남은 공연일이 없습니다', '')); sel.disabled = true; }
+}
+function resetNolOptions() {
+  $('nol_seq').innerHTML = '<option value="">전체 회차</option>';
+  $('nol_grade').innerHTML = '<option value="">전체 등급</option>';
+  $('nol_results').innerHTML = '';
+}
+$('nol_form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!nolGoods) { setMsg($('nol_msg'), '공연을 먼저 검색해 선택하세요.', true); return; }
+  const date = $('nol_date').value || null;
+  $('btn_nol_seats').disabled = true; setMsg($('nol_msg'), date ? '조회 중…' : '남은 기간을 하루씩 조회 중… (며칠 분량이면 몇 초 걸립니다)');
+  try {
+    const r = await api('/api/nol/remaining', { method: 'POST', body: JSON.stringify({ goods_code: nolGoods.code, date }) });
+    renderNol(r);
+    setMsg($('nol_msg'), r.telegram_sent ? '조회 결과를 텔레그램으로 보냈습니다.' : '조회 완료 (텔레그램 미연결이면 화면에서만 확인)');
+  } catch (err) { setMsg($('nol_msg'), err.message, true); }
+  finally { $('btn_nol_seats').disabled = !currentAllowed; }
+});
+function renderNol(r) {
+  const seats = r.seats, avail = seats.filter(s => s.available);
+  // 회차·등급 드롭다운을 결과로 채운다 (기존 선택은 유지)
+  const seqSel = $('nol_seq'), gradeSel = $('nol_grade');
+  const prevSeq = seqSel.value, prevGrade = gradeSel.value;
+  seqSel.innerHTML = '<option value="">전체 회차</option>'; gradeSel.innerHTML = '<option value="">전체 등급</option>';
+  const times = (nolGoods && nolGoods.show_times) || {};
+  const seqs = new Map();
+  for (const s of seats) if (!seqs.has(s.play_seq)) seqs.set(s.play_seq, s.play_date);
+  for (const [seq, d] of seqs) seqSel.appendChild(new Option(`${seq}회차 (${d}${(times[d] || []).length === 1 ? ' ' + times[d][0] : ''})`, seq));
+  for (const g of [...new Set(seats.map(s => s.grade_name))]) gradeSel.appendChild(new Option(g, g));
+  seqSel.value = prevSeq; gradeSel.value = prevGrade;
+  const box = $('nol_results');
+  if (!seats.length) { box.innerHTML = '<p class="muted" style="margin:8px 0 0">회차 정보가 없습니다. 예매가 닫혔거나 아직 열리지 않은 날짜입니다.</p>'; return; }
+  let html = `<div class="row" style="margin-top:10px"><span class="tag ${avail.length ? 'ok' : 'no'}">${seats.length}개 회차·등급 중 잔여 있는 것 ${avail.length}개</span></div>`;
+  html += '<div class="wrap" style="margin-top:8px"><table><thead><tr><th>관람일</th><th>회차</th><th>등급</th><th>잔여</th></tr></thead><tbody>';
+  for (const s of seats) {
+    const t = (times[s.play_date] || []);
+    html += `<tr><td>${esc(s.play_date)}${t.length === 1 ? ' ' + esc(t[0]) : ''}</td><td>${esc(s.play_seq)}</td><td>${esc(s.grade_name)}</td>` +
+      `<td>${s.available ? `<span class="tag ok">${s.remain}석</span>` : '<span class="tag no">매진</span>'}</td></tr>`;
+  }
+  box.innerHTML = html + '</tbody></table></div>';
+}
+$('btn_nol_watch').addEventListener('click', async () => {
+  try {
+    if (!nolGoods) throw new Error('공연을 먼저 검색해 선택하세요.');
+    const date = $('nol_date').value;
+    if (!date) throw new Error('감시는 관람일을 하나 골라야 합니다. (전체 기간은 조회만 가능)');
+    if (nolWatchLimit !== null && activeNolWatches + 1 > nolWatchLimit) {
+      throw new Error(`활성 공연 감시는 최대 ${nolWatchLimit}건입니다 (현재 ${activeNolWatches}건). 기존 공연 감시를 중지하거나 삭제하세요.`);
+    }
+    const grade = $('nol_grade').value;
+    await api('/api/watches/nol', { method: 'POST', body: JSON.stringify({
+      goods_code: nolGoods.code, date, play_seq: $('nol_seq').value, grades: grade ? [grade] : [],
+    }) });
+    setMsg($('watch_msg'), `공연 감시를 등록했습니다: ${nolGoods.name} ${date}. 다음 주기부터 점검합니다.`);
+    setMsg($('nol_msg'), '감시를 등록했습니다. 아래 감시 목록에서 확인하세요.');
+    loadWatches(); loadMe().catch(() => {});
+  } catch (err) { setMsg($('nol_msg'), err.message, true); }
+});
+
 // ---------------------------------------------------------------- 내 설정 / 권한
-const TRAIN_BUTTONS = ['btn_search', 'btn_watch', 'btn_run_now', 'btn_korail_test'];
+const TRAIN_BUTTONS = ['btn_search', 'btn_watch', 'btn_run_now', 'btn_korail_test', 'btn_nol_search', 'btn_nol_seats', 'btn_nol_watch'];
 function applyAllowed(allowed) {
   $('denied_box').hidden = allowed;
   for (const id of TRAIN_BUTTONS) $(id).disabled = !allowed;
@@ -374,8 +565,11 @@ async function loadMe() {
   currentAllowed = !!m.allowed;
   applyAllowed(currentAllowed);
   watchLimit = (m.watch_limit === null || m.watch_limit === undefined) ? null : m.watch_limit;
-  activeWatches = m.active_watches || 0;
-  $('watch_quota').textContent = watchLimit === null ? `활성 ${activeWatches}건 · 무제한` : `활성 ${activeWatches}/${watchLimit}건`;
+  nolWatchLimit = (m.nol_watch_limit === null || m.nol_watch_limit === undefined) ? null : m.nol_watch_limit;
+  activeWatches = m.active_train_watches || 0;
+  activeNolWatches = m.active_nol_watches || 0;
+  const quota = (n, lim) => lim === null ? `${n}건 (무제한)` : `${n}/${lim}건`;
+  $('watch_quota').textContent = `활성 🚄 기차 ${quota(activeWatches, watchLimit)} · 🎫 공연 ${quota(activeNolWatches, nolWatchLimit)}`;
   if (document.activeElement !== $('s_korail_id')) $('s_korail_id').value = m.korail_id || '';
   $('s_korail_pw').placeholder = m.korail_pw_set ? '설정됨 · 변경할 때만 입력' : '코레일 비밀번호';
   // 텔레그램 연결 상태
@@ -390,8 +584,11 @@ async function loadMe() {
   }
   if (!linked && !tgWaitTimer) tgWaitTimer = setInterval(() => loadMe().catch(() => {}), 5000);
   if (linked && tgWaitTimer) { clearInterval(tgWaitTimer); tgWaitTimer = null; }
-  $('settings_hint').textContent = !m.korail_configured ? '· 코레일 계정 미등록' : !linked ? '· 텔레그램 미연결' : '';
-  if (!m.korail_configured || !linked) $('settings_box').open = true;
+  const hints = [];
+  if (!linked) hints.push('텔레그램 미연결');
+  if (!m.korail_configured) hints.push('코레일 계정 미등록 (기차 조회에만 필요)');
+  $('settings_hint').textContent = hints.length ? '· ' + hints.join(' · ') : '';
+  if (!linked) $('settings_box').open = true;
 }
 let tgWaitTimer = null;
 $('btn_tg_unlink').addEventListener('click', async () => {
@@ -427,9 +624,8 @@ async function loadStatus() {
     const s = await api('/api/status');
     const dot = (on) => `<span class="dot ${on ? 'on' : 'off'}"></span>`;
     $('status').innerHTML =
-      `<span>${dot(s.korail_configured)}코레일 계정 ${s.korail_configured ? '등록됨' : '미등록(내 설정)'}</span>` +
-      `<span>${dot(s.korail_logged_in)}코레일 로그인 ${s.korail_logged_in ? '유지 중' : '안 됨'}</span>` +
       `<span>${dot(s.telegram_bot_configured && s.telegram_chat_configured)}텔레그램 ${!s.telegram_bot_configured ? '봇 미설정(서버)' : s.telegram_chat_configured ? '연결됨' : '미연결 (내 설정에서 코드 전송)'}</span>` +
+      `<span>${dot(s.korail_configured)}코레일 계정(기차용) ${s.korail_configured ? (s.korail_logged_in ? '등록됨 · 로그인 유지 중' : '등록됨') : '미등록 (내 설정)'}</span>` +
       (s.telegram_poll_error ? `<span style="color:var(--no)">텔레그램 수신 오류: ${esc(s.telegram_poll_error)}</span>` : '') +
       `<span>감시 주기 ${s.poll_interval_sec}초 · 내 감시 ${s.active_watches}건 (전체 ${s.total_active_watches}건, 사용자 ${s.users}명) · 마지막 점검 ${esc(fmtTs(s.last_cycle_at))}</span>` +
       (s.korail_last_error ? `<span style="color:var(--no)">${esc(s.korail_last_error)}</span>` : '');

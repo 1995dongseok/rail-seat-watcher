@@ -12,8 +12,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app import telegram
+from app import call_stats, nol_service, telegram
 from app.config import settings
+from app.nol_service import MAX_SCAN_DAYS, NolError
 from app.ratelimit import auth_lock, run_now_limit, search_limit
 from app.korail_service import TRAIN_TYPE_CODES, SearchError, close_all, drop_service, get_service, load_stations
 from app.users import MAX_POLL_INTERVAL, MIN_POLL_INTERVAL, SESSION_DAYS, User, user_store
@@ -42,7 +43,7 @@ async def lifespan(_: FastAPI):
 
 
 # API 문서(/docs, /openapi.json)는 공개하지 않는다.
-app = FastAPI(title="기차 빈자리 조회", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title="빈자리 알리미", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
 def client_ip(request: Request) -> str:
@@ -182,8 +183,11 @@ def _me_summary(user: User) -> dict:
         "telegram_bot_username": telegram.bot_username,
         "korail_logged_in": svc.logged_in,
         "korail_last_error": svc.last_error,
-        "watch_limit": user.effective_watch_limit,  # None = 무제한
+        "watch_limit": user.effective_watch_limit,  # 기차 상한. None = 무제한
+        "nol_watch_limit": user.effective_nol_watch_limit,  # 공연 상한. None = 무제한
         "active_watches": watch_store.active_count(user.id),
+        "active_train_watches": watch_store.active_count(user.id, "korail"),
+        "active_nol_watches": watch_store.active_count(user.id, "nol"),
     }
 
 
@@ -211,6 +215,7 @@ class AdminUserUpdate(BaseModel):
     approved: bool | None = None
     telegram_chat_id: str | None = Field(default=None, max_length=30)
     watch_limit: int | None = Field(default=None, ge=0, le=20)
+    nol_watch_limit: int | None = Field(default=None, ge=0, le=20)
     poll_interval_sec: int | None = Field(default=None, ge=MIN_POLL_INTERVAL, le=MAX_POLL_INTERVAL)
 
     @field_validator("telegram_chat_id")
@@ -220,7 +225,15 @@ class AdminUserUpdate(BaseModel):
 
 
 def _admin_row(u: User) -> dict:
-    return u.admin_view() | {"active_watches": sum(1 for w in watch_store.list(u.id) if w.active)}
+    active = [w for w in watch_store.list(u.id) if w.active]
+    calls = call_stats.get(u.id)
+    return u.admin_view() | {
+        "active_watches": len(active),
+        "active_train_watches": sum(1 for w in active if not w.is_nol),
+        "active_nol_watches": sum(1 for w in active if w.is_nol),
+        "total_korail_calls": calls["korail"],
+        "total_nol_calls": calls["nol"],
+    }
 
 
 @app.get("/admin")
@@ -253,9 +266,15 @@ async def admin_stats(_: User = Depends(admin_user)):
             "duration_sec": round(sum(h["duration_sec"] for h in history) / len(history), 1),
         }
     calls_10m = korail_service.calls_in_last(600)
+    nol_10m = nol_service.calls_in_last(600)
     return {
         "default_poll_interval_sec": settings.poll_interval_sec,
         "active_watches": sum(1 for w in watch_store.list() if w.active),
+        "active_train_watches": sum(1 for w in watch_store.list() if w.active and not w.is_nol),
+        "active_nol_watches": sum(1 for w in watch_store.list() if w.active and w.is_nol),
+        "nol_calls_last_10min": nol_10m,
+        "nol_calls_per_min": round(nol_10m / 10, 1),
+        "nol_total_calls_since_start": nol_service.total_calls,
         "last_cycle": watcher.last_cycle,
         "average": avg,
         "calls_last_10min": calls_10m,
@@ -273,7 +292,9 @@ async def admin_update_user(user_id: str, req: AdminUserUpdate, admin: User = De
         raise HTTPException(status_code=404, detail="사용자가 없습니다")
     if target.is_admin and req.approved is False:
         raise HTTPException(status_code=400, detail="관리자 계정은 거부할 수 없습니다")
-    user_store.admin_update(target, req.approved, req.telegram_chat_id, req.watch_limit, req.poll_interval_sec)
+    user_store.admin_update(
+        target, req.approved, req.telegram_chat_id, req.watch_limit, req.poll_interval_sec, req.nol_watch_limit
+    )
     return _admin_row(target)
 
 
@@ -287,6 +308,7 @@ async def admin_delete_user(user_id: str, admin: User = Depends(admin_user)):
     removed = watch_store.remove_by_user(target.id)
     drop_service(target.id)
     user_store.delete(target.id)
+    call_stats.remove(target.id)
     return {"ok": True, "removed_watches": removed}
 
 
@@ -306,7 +328,7 @@ async def telegram_test(user: User = Depends(current_user)):
         raise HTTPException(status_code=400, detail="서버에 텔레그램 봇 토큰이 설정되지 않았습니다 (.env TELEGRAM_BOT_TOKEN)")
     if not user.telegram_chat_id:
         raise HTTPException(status_code=400, detail="내 설정에서 텔레그램 chat_id 를 먼저 등록하세요")
-    ok = await telegram.send_message(user.telegram_chat_id, f"✅ {user.username}님, 기차 빈자리 조회 텔레그램 연결 테스트")
+    ok = await telegram.send_message(user.telegram_chat_id, f"✅ {user.username}님, 빈자리 알리미 텔레그램 연결 테스트")
     if not ok:
         raise HTTPException(status_code=400, detail="텔레그램 발송 실패. chat_id 를 확인하고 봇에게 먼저 메시지를 보냈는지 확인하세요.")
     return {"ok": True}
@@ -447,21 +469,23 @@ async def list_watches(user: User = Depends(current_user)):
     return [w.to_dict() for w in watch_store.list(user.id)]
 
 
-def _check_watch_limit(user: User, adding: int = 1) -> None:
-    limit = user.effective_watch_limit
+def _check_watch_limit(user: User, kind: str = "korail", adding: int = 1) -> None:
+    """종류(기차/공연)별 활성 감시 상한 검사. 관리자는 무제한."""
+    limit = user.limit_for(kind)
     if limit is None:
         return
-    active = watch_store.active_count(user.id)
+    active = watch_store.active_count(user.id, kind)
+    name = "공연" if kind == "nol" else "기차"
     if active + adding > limit:
         raise HTTPException(
             status_code=400,
-            detail=f"활성 감시는 최대 {limit}건입니다 (현재 {active}건). 기존 감시를 중지하거나 삭제하세요.",
+            detail=f"활성 {name} 감시는 최대 {limit}건입니다 (현재 {active}건). 기존 {name} 감시를 중지하거나 삭제하세요.",
         )
 
 
 @app.post("/api/watches", status_code=201)
 async def add_watch(req: WatchRequest, user: User = Depends(approved_user)):
-    _check_watch_limit(user)
+    _check_watch_limit(user, "korail")
     w = watch_store.add(
         user_id=user.id,
         dep=req.dep,
@@ -471,6 +495,153 @@ async def add_watch(req: WatchRequest, user: User = Depends(approved_user)):
         time_to=req.time_to,
         train_type=req.train_type,
         seat_pref=req.seat_pref,
+    )
+    return w.to_dict()
+
+
+# ----------------------------------------------------------------- NOL 티켓(공연)
+GOODS_CODE = re.compile(r"^\d{5,12}$")
+
+
+def _nol_goods(code: str) -> str:
+    """상품코드 또는 상품 URL 을 코드로 정규화한다."""
+    normalized = nol_service.normalize_code(code)
+    if normalized is None:
+        raise HTTPException(status_code=422, detail="상품코드(숫자) 또는 NOL 상품 주소를 입력하세요")
+    return normalized
+
+
+async def _nol(fn, *args):
+    """NOL 호출을 스레드에서 실행하고, 실패를 화면용 JSON 오류로 바꾼다.
+
+    NolError(통신·응답 오류)는 400, 그 밖의 예외는 로그를 남기고 502. 어떤 경우에도 연결이 끊기지 않게 한다.
+    """
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except NolError as e:
+        log.warning("NOL %s 실패: %s", fn.__name__, e)
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        log.exception("NOL %s 중 예상치 못한 오류", fn.__name__)
+        raise HTTPException(status_code=502, detail=f"NOL 조회 중 서버 오류: {type(e).__name__}: {e}") from e
+
+
+def _nol_date(v: str | None) -> str | None:
+    v = (v or "").strip() or None
+    if v is not None and not YMD.match(v):
+        raise ValueError("날짜는 YYYY-MM-DD 형식이어야 합니다")
+    return v
+
+
+class NolRemainingRequest(BaseModel):
+    goods_code: str = Field(min_length=1, max_length=200)
+    date: str | None = None  # 비우면 남은 공연 기간을 하루씩 조회(최대 MAX_SCAN_DAYS 일)
+    date_to: str | None = None
+
+    @field_validator("date", "date_to")
+    @classmethod
+    def _date(cls, v: str | None) -> str | None:
+        return _nol_date(v)
+
+
+class NolWatchRequest(BaseModel):
+    goods_code: str = Field(min_length=1, max_length=200)
+    date: str
+    play_seq: str = ""
+    grades: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("date")
+    @classmethod
+    def _date(cls, v: str) -> str:
+        if not YMD.match(v):
+            raise ValueError("날짜는 YYYY-MM-DD 형식이어야 합니다")
+        return v
+
+    @field_validator("play_seq")
+    @classmethod
+    def _seq(cls, v: str) -> str:
+        v = v.strip()
+        if v and not re.match(r"^\d{1,4}$", v):
+            raise ValueError("회차는 숫자여야 합니다")
+        return v
+
+    @field_validator("grades")
+    @classmethod
+    def _grades(cls, v: list[str]) -> list[str]:
+        return [g.strip()[:40] for g in v if g and g.strip()]
+
+
+def _format_nol_result(goods, seats: list) -> str:
+    available = [s for s in seats if s.available]
+    dates = sorted({s.play_date for s in seats})
+    when = f"{dates[0]}~{dates[-1]}" if len(dates) > 1 else (dates[0] if dates else "-")
+    lines = [f"🔍 공연 조회: {goods.name} {when}", f"{len(seats)}개 회차·등급 중 잔여 있는 것 {len(available)}개"]
+    if not available:
+        lines.append("잔여석 없음")
+    for s in available[:MAX_TELEGRAM_LINES]:
+        lines.append(f"- {s.play_date} {s.play_seq}회차 {s.grade_name}  잔여 {s.remain}석")
+    lines.append(f"예매: {goods.url}")
+    return "\n".join(lines)
+
+
+@app.get("/api/nol/search")
+async def nol_search(q: str, upcoming: bool = False, user: User = Depends(approved_user)):
+    """공연명·아티스트로 검색(기본은 판매 중인 공연만, upcoming=1 이면 판매 예정 포함).
+
+    상품코드나 상품 URL 을 넣으면 그 상품을 바로 돌려준다.
+    """
+    q = q.strip()
+    if len(q) < 2 or len(q) > 100:
+        raise HTTPException(status_code=422, detail="검색어는 2~100자")
+    denied = search_limit.check(user.id)
+    if denied:
+        raise HTTPException(status_code=429, detail=denied)
+    code = nol_service.normalize_code(q)
+    if code:
+        g = await _nol(nol_service.get_goods, code, user.id)
+        return {"items": [{"code": g.code, "title": g.name, "date_info": f"{g.play_start}~{g.play_end}", "place": g.place, "url": g.url}]}
+    return {"items": await _nol(nol_service.search, q, user.id, upcoming)}
+
+
+@app.get("/api/nol/goods/{code}")
+async def nol_goods(code: str, user: User = Depends(approved_user)):
+    code = _nol_goods(code)
+    g = await _nol(nol_service.get_goods, code, user.id)
+    return g.to_dict() | {"max_scan_days": MAX_SCAN_DAYS}
+
+
+@app.post("/api/nol/remaining")
+async def nol_remaining(req: NolRemainingRequest, user: User = Depends(approved_user)):
+    denied = search_limit.check(user.id)
+    if denied:
+        raise HTTPException(status_code=429, detail=denied)
+    code = _nol_goods(req.goods_code)
+    goods = await _nol(nol_service.get_goods, code, user.id)
+    if req.date and not req.date_to:
+        seats = await _nol(nol_service.remaining_by_date, code, req.date, user.id)
+    else:
+        seats = await _nol(nol_service.scan_dates, goods, req.date, req.date_to, user.id)
+    sent = False
+    if user.telegram_chat_id and settings.telegram_configured:
+        sent = await telegram.send_message(user.telegram_chat_id, _format_nol_result(goods, seats))
+    return {"goods": goods.to_dict(), "count": len(seats), "seats": [s.to_dict() for s in seats], "telegram_sent": sent}
+
+
+@app.post("/api/watches/nol", status_code=201)
+async def add_nol_watch(req: NolWatchRequest, user: User = Depends(approved_user)):
+    _check_watch_limit(user, "nol")
+    code = _nol_goods(req.goods_code)
+    goods = await _nol(nol_service.get_goods, code, user.id)
+    if goods.play_start and goods.play_end and not (goods.play_start <= req.date <= goods.play_end):
+        raise HTTPException(status_code=400, detail=f"관람일은 공연 기간({goods.play_start}~{goods.play_end}) 안이어야 합니다")
+    w = watch_store.add(
+        user_id=user.id,
+        kind="nol",
+        date=req.date,
+        goods_code=code,
+        goods_name=goods.name,
+        play_seq=req.play_seq,
+        grades=req.grades,
     )
     return w.to_dict()
 
@@ -495,7 +666,7 @@ async def run_now(user: User = Depends(approved_user)):
 async def toggle_watch(watch_id: str, user: User = Depends(approved_user)):
     current = _own_watch(watch_id, user)
     if not current.active:  # 재개도 상한에 포함
-        _check_watch_limit(user)
+        _check_watch_limit(user, current.kind)
     w = watch_store.set_active(watch_id, not current.active)
     return w.to_dict()
 

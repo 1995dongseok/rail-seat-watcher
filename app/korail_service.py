@@ -29,6 +29,7 @@ from pykorail.exceptions import (
 )
 from pykorail.options import TrainType
 
+from app import call_stats
 from app.config import now_kst
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ def record_call(owner_id: str = "") -> None:
     with _call_lock:
         _call_log.append((time.monotonic(), owner_id))
         total_calls += 1
+    call_stats.record(owner_id, "korail")
 
 
 def calls_in_last(seconds: float) -> int:

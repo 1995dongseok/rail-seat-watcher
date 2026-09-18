@@ -154,7 +154,7 @@ class LinkPoller:
         if code_lock.locked_for(key) > 0:
             return  # 틀린 코드를 너무 많이 보낸 채팅은 답장 없이 무시
         if text.startswith("/start"):
-            await send_message(key, "기차 빈자리 조회 봇입니다.\n사이트의 '내 설정'에 표시된 6자리 연결 코드를 이 대화에 보내 주세요.")
+            await send_message(key, "빈자리 알리미 봇입니다.\n사이트의 '내 설정'에 표시된 6자리 연결 코드를 이 대화에 보내 주세요.")
             return
         m = CODE_RE.search(text)
         if not m:
