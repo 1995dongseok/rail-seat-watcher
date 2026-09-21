@@ -46,6 +46,8 @@
   </div>
   <p class="muted" style="margin:6px 0 0">신규 가입자는 기본 <b>거부</b> 상태입니다. 허용해야 기차·공연 조회와 감시를 쓸 수 있습니다. 코레일 계정은 <b>기차</b> 조회에만 필요하고, 공연(NOL 티켓)은 계정 없이 조회됩니다. 텔레그램은 사용자가 봇에게 연결 코드를 보내면 자동으로 연결되며, 필요하면 여기서 chat_id 를 직접 고칠 수 있습니다.</p>
 
+  <p class="muted">항공 조회는 별도 허용이 필요합니다. 사용자 표에서 전체 사용과 ✈ 항공 사용을 모두 허용하세요. 관리자는 항상 사용할 수 있습니다.</p>
+
   <div class="card" id="stats_card">
     <div class="row" style="margin-top:0">
       <strong>외부 호출 부하</strong>
@@ -98,8 +100,8 @@
   <div class="card">
     <div class="wrap">
       <table>
-        <thead><tr><th>사용자</th><th>가입일</th><th>사용</th><th>코레일 계정<br><span class="kind">기차용</span></th><th>텔레그램 chat_id</th><th>누적 조회<br><span class="kind">코레일 · NOL</span></th><th>🚄 기차 감시<br><span class="kind">활성 / 상한</span></th><th>🎫 공연 감시<br><span class="kind">활성 / 상한</span></th><th>감시 주기</th><th></th></tr></thead>
-        <tbody id="body"><tr><td colspan="10" class="muted">불러오는 중…</td></tr></tbody>
+        <thead><tr><th>사용자</th><th>가입일</th><th>사용</th><th>✈ 항공 사용</th><th>코레일 계정<br><span class="kind">기차용</span></th><th>텔레그램 chat_id</th><th>누적 조회<br><span class="kind">코레일 · NOL</span></th><th>🚄 기차 감시<br><span class="kind">활성 / 상한</span></th><th>🎫 공연 감시<br><span class="kind">활성 / 상한</span></th><th>감시 주기</th><th></th></tr></thead>
+        <tbody id="body"><tr><td colspan="11" class="muted">불러오는 중…</td></tr></tbody>
       </table>
     </div>
     <div class="msg" id="msg"></div>
@@ -130,6 +132,8 @@ async function load() {
       `<td class="muted">${esc((u.created_at || '').replace('T', ' '))}</td>` +
       `<td>${u.allowed ? '<span class="tag ok">허용</span>' : '<span class="tag no">거부</span>'} ` +
         (u.is_admin ? '' : `<button data-act="toggle" data-id="${esc(u.id)}" data-next="${u.approved ? 'false' : 'true'}">${u.approved ? '거부로 변경' : '허용'}</button>`) + `</td>` +
+      `<td>${u.is_admin ? '<span class="tag ok">항상 허용</span>' :
+        `<span class="tag ${u.flight_approved ? 'ok' : 'no'}">${u.flight_approved ? '허용' : '거부'}</span> <button data-act="flight" data-id="${esc(u.id)}" data-next="${!u.flight_approved}">${u.flight_approved ? '거부로 변경' : '허용'}</button>${u.flight_approved && !u.allowed ? '<div class="muted">전체 사용 허용 필요</div>' : ''}`}</td>` +
       `<td>${u.korail_configured ? '<span class="tag ok">등록됨</span>' : '<span class="muted">미등록</span>'}</td>` +
       `<td><input data-chat="${esc(u.id)}" value="${esc(u.telegram_chat_id)}" placeholder="미연결" inputmode="numeric"> <button data-act="chat" data-id="${esc(u.id)}">저장</button>` +
         (u.telegram_name ? `<div class="muted" style="font-size:12px">${esc(u.telegram_name)}</div>` : '') + `</td>` +
@@ -142,7 +146,7 @@ async function load() {
       `<td>${u.is_admin ? '' : `<button class="danger" data-act="del" data-id="${esc(u.id)}" data-name="${esc(u.username)}">삭제</button>`}</td>`;
     body.appendChild(tr);
   }
-  if (!users.length) body.innerHTML = '<tr><td colspan="10" class="muted">사용자가 없습니다.</td></tr>';
+  if (!users.length) body.innerHTML = '<tr><td colspan="11" class="muted">사용자가 없습니다.</td></tr>';
 }
 
 $('body').addEventListener('click', async (e) => {
@@ -152,6 +156,9 @@ $('body').addEventListener('click', async (e) => {
     if (b.dataset.act === 'toggle') {
       await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ approved: b.dataset.next === 'true' }) });
       setMsg('사용 상태를 바꿨습니다.');
+    } else if (b.dataset.act === 'flight') {
+      await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ flight_approved: b.dataset.next === 'true' }) });
+      setMsg('항공 사용 권한을 변경했습니다. 사용자 화면에는 새로고침 또는 30초 이내에 반영됩니다.');
     } else if (b.dataset.act === 'chat') {
       const v = document.querySelector(`input[data-chat="${id}"]`).value;
       await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ telegram_chat_id: v }) });

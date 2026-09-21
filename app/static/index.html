@@ -225,7 +225,7 @@
     <form class="card" id="flight_form">
       <strong>왕복 항공권 조회</strong>
       <p class="muted">기간 안에 출발·귀국하는 일정을 비교합니다. 시간은 각 공항 현지 기준이며, 밤샘 경유·다음 날 도착·23시 이후 도착은 제외합니다.</p>
-      <p class="muted" id="flight_admin_notice">항공 조회는 관리자만 사용할 수 있습니다.</p>
+      <p class="muted" id="flight_admin_notice">항공 조회는 관리자가 별도로 허용한 사용자만 사용할 수 있습니다.</p>
       <fieldset id="flight_fields" disabled>
         <legend>여행 조건</legend>
         <div class="grid">
@@ -431,7 +431,7 @@ $('btn_watch').addEventListener('click', async () => {
   } catch (err) { setMsg($('watch_msg'), err.message, true); }
 });
 
-let currentAdmin = false;
+let currentFlightAllowed = false;
 let currentAllowed = true;
 async function loadWatches() {
   const list = await api('/api/watches');
@@ -678,7 +678,7 @@ const TRAIN_BUTTONS = ['btn_search', 'btn_watch', 'btn_run_now', 'btn_korail_tes
 function applyAllowed(allowed) {
   $('denied_box').hidden = allowed;
   for (const id of TRAIN_BUTTONS) $(id).disabled = !allowed;
-  flightAllowed = currentAdmin && allowed;
+  flightAllowed = currentFlightAllowed && allowed;
   $('flight_admin_notice').hidden = flightAllowed;
   $('flight_fields').disabled = !flightAllowed || flightBusy;
   $('btn_flight_search').disabled = !flightAllowed || flightBusy;
@@ -691,7 +691,7 @@ async function loadMe() {
   const m = await api('/api/me');
   $('who').textContent = m.username + '님';
   $('admin_link').hidden = !m.is_admin;
-  currentAdmin = !!m.is_admin;
+  currentFlightAllowed = !!m.flight_allowed;
   currentAllowed = !!m.allowed;
   applyAllowed(currentAllowed);
   watchLimit = (m.watch_limit === null || m.watch_limit === undefined) ? null : m.watch_limit;

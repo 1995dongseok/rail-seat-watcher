@@ -39,6 +39,7 @@ class User:
     telegram_link_code_at: str = ""  # 코드 발급 시각(ISO). LINK_CODE_TTL_SEC 지나면 무효
     device_profile_id: str = ""
     approved: bool = False  # 관리자가 허용해야 조회/감시 가능. 기본 거부
+    flight_approved: bool = False
     watch_limit: int = 2  # 동시에 활성화할 수 있는 기차 감시 수. 관리자는 무제한
     nol_watch_limit: int = 2  # 동시에 활성화할 수 있는 공연(NOL) 감시 수. 관리자는 무제한
     poll_interval_sec: int = 0  # 이 사용자의 감시 주기(초). 0 이면 서버 기본값(.env)
@@ -52,6 +53,10 @@ class User:
     def allowed(self) -> bool:
         """조회·감시 사용 가능 여부. 관리자는 항상 허용."""
         return self.approved or self.is_admin
+
+    @property
+    def flight_allowed(self) -> bool:
+        return self.is_admin or (self.approved and self.flight_approved)
 
     @property
     def effective_watch_limit(self) -> int | None:
@@ -90,6 +95,8 @@ class User:
             "is_admin": self.is_admin,
             "approved": self.approved,
             "allowed": self.allowed,
+            "flight_approved": self.flight_approved,
+            "flight_allowed": self.flight_allowed,
             "korail_configured": self.korail_configured,
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_name": self.telegram_name,
@@ -181,11 +188,14 @@ class UserStore:
         watch_limit: int | None = None,
         poll_interval_sec: int | None = None,
         nol_watch_limit: int | None = None,
+        flight_approved: bool | None = None,
     ) -> User:
         """관리자가 허용/거부, chat_id, 감시 상한(기차/공연), 감시 주기를 바꾼다."""
         with self._lock:
             if approved is not None:
                 user.approved = approved
+            if flight_approved is not None:
+                user.flight_approved = flight_approved
             if telegram_chat_id is not None:
                 user.telegram_chat_id = telegram_chat_id.strip()
                 if not user.telegram_chat_id:

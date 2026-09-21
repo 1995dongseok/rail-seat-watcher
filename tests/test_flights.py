@@ -1,6 +1,9 @@
 import asyncio
 import copy
 import unittest
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -113,7 +116,7 @@ class FlightTests(unittest.TestCase):
         with patch.object(f, "settings", SimpleNamespace(serpapi_key="")), self.assertRaises(f.FlightError):
             asyncio.run(f.search(self.req))
 
-    def test_only_admin_can_use_flight_apis(self):
+    def test_only_authorized_users_can_use_flight_apis(self):
         from fastapi.testclient import TestClient
         from app.main import app, current_user
 
@@ -125,16 +128,62 @@ class FlightTests(unittest.TestCase):
                 for path, payload in payloads.items():
                     self.assertEqual(client.post(path, json=payload).status_code, 401)
                 for approved in (False, True):
-                    app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=False, allowed=approved)
+                    app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=False, allowed=approved, flight_allowed=False)
                     for path, payload in payloads.items():
                         self.assertEqual(client.post(path, json=payload).status_code, 403)
                 search.assert_not_called()
-                app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=True, allowed=True)
+                app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=True, allowed=True, flight_allowed=True)
                 for path, payload in payloads.items():
                     self.assertEqual(client.post(path, json=payload).status_code, 200)
                 search.assert_awaited_once()
         finally:
             app.dependency_overrides.pop(current_user, None)
+
+    def test_admin_grant_revoke_and_persistence(self):
+        from fastapi.testclient import TestClient
+        from app import users, main
+
+        with TemporaryDirectory() as folder, \
+             patch.object(users, "USERS_FILE", Path(folder) / "users.json"), \
+             patch.object(users, "SESSIONS_FILE", Path(folder) / "sessions.json"):
+            # Existing records without the new field remain denied.
+            users.USERS_FILE.write_text(json.dumps([{"id": "member", "username": "flight-test-member",
+                                                     "password_hash": "unused", "approved": True}]), encoding="utf-8")
+            store = users.UserStore()
+            member = store.get("member")
+            self.assertFalse(member.flight_allowed)
+            admin = users.User(id="admin-test", username=users.settings.admin_username, password_hash="unused")
+            self.assertTrue(admin.flight_allowed)
+            client = TestClient(main.app)
+            try:
+                with patch.object(main, "user_store", store), \
+                     patch.object(main, "_admin_row", side_effect=lambda u: u.admin_view()), \
+                     patch.object(f, "search", new_callable=AsyncMock, return_value={"offers": []}) as search:
+                    main.app.dependency_overrides[main.current_user] = lambda: member
+                    self.assertEqual(client.put('/api/admin/users/member', json={"flight_approved": True}).status_code, 403)
+                    self.assertFalse(member.flight_approved)
+                    main.app.dependency_overrides[main.current_user] = lambda: admin
+                    response = client.put('/api/admin/users/member', json={"flight_approved": True})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json()["flight_allowed"])
+                    self.assertTrue(users.UserStore().get("member").flight_approved)
+                    main.app.dependency_overrides[main.current_user] = lambda: member
+                    payload = self.base | {"outbound_date": "2026-11-05"}
+                    self.assertEqual(client.post('/api/flights/search', json=payload).status_code, 200)
+                    search.assert_awaited_once()
+                    member.approved = False
+                    self.assertFalse(member.flight_allowed)
+                    self.assertEqual(client.post('/api/flights/search', json=payload).status_code, 403)
+                    member.approved = True
+                    main.app.dependency_overrides[main.current_user] = lambda: admin
+                    self.assertEqual(client.put('/api/admin/users/member', json={"flight_approved": False}).status_code, 200)
+                    self.assertFalse(users.UserStore().get("member").flight_allowed)
+                    main.app.dependency_overrides[main.current_user] = lambda: member
+                    self.assertEqual(client.post('/api/flights/search', json=payload).status_code, 403)
+                    self.assertEqual(client.post('/api/flights/plan', json=self.base).status_code, 403)
+                    search.assert_awaited_once()
+            finally:
+                main.app.dependency_overrides.pop(main.current_user, None)
 
 
 if __name__ == "__main__":

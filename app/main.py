@@ -79,6 +79,12 @@ def admin_user(user: User = Depends(current_user)) -> User:
     return user
 
 
+def flight_user(user: User = Depends(current_user)) -> User:
+    if not user.flight_allowed:
+        raise HTTPException(status_code=403, detail="관리자가 항공 사용을 허용한 사용자만 이용할 수 있습니다")
+    return user
+
+
 def _set_cookie(request: Request, response: Response, token: str) -> None:
     response.set_cookie(
         COOKIE, token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=_is_https(request)
@@ -172,6 +178,7 @@ def _me_summary(user: User) -> dict:
     return {
         "username": user.username,
         "is_admin": user.is_admin,
+        "flight_allowed": user.flight_allowed,
         "allowed": user.allowed,
         "korail_id": user.korail_id,
         "korail_configured": user.korail_configured,
@@ -213,6 +220,7 @@ async def update_settings(req: SettingsRequest, user: User = Depends(current_use
 # ----------------------------------------------------------------- 관리자
 class AdminUserUpdate(BaseModel):
     approved: bool | None = None
+    flight_approved: bool | None = None
     telegram_chat_id: str | None = Field(default=None, max_length=30)
     watch_limit: int | None = Field(default=None, ge=0, le=20)
     nol_watch_limit: int | None = Field(default=None, ge=0, le=20)
@@ -293,7 +301,8 @@ async def admin_update_user(user_id: str, req: AdminUserUpdate, admin: User = De
     if target.is_admin and req.approved is False:
         raise HTTPException(status_code=400, detail="관리자 계정은 거부할 수 없습니다")
     user_store.admin_update(
-        target, req.approved, req.telegram_chat_id, req.watch_limit, req.poll_interval_sec, req.nol_watch_limit
+        target, req.approved, req.telegram_chat_id, req.watch_limit, req.poll_interval_sec, req.nol_watch_limit,
+        flight_approved=req.flight_approved,
     )
     return _admin_row(target)
 
@@ -382,12 +391,12 @@ async def stations(_: User = Depends(current_user)):
 
 # ----------------------------------------------------------------- 조회 / 감시
 @app.post("/api/flights/plan")
-async def flight_plan(req: flight_service.FlightRequest, _: User = Depends(admin_user)):
+async def flight_plan(req: flight_service.FlightRequest, _: User = Depends(flight_user)):
     return {"dates": req.dates(), "configured": bool(settings.serpapi_key)}
 
 
 @app.post("/api/flights/search")
-async def flight_search(req: flight_service.FlightSearchRequest, _: User = Depends(admin_user)):
+async def flight_search(req: flight_service.FlightSearchRequest, _: User = Depends(flight_user)):
     try:
         return await flight_service.search(req)
     except flight_service.FlightError as exc:
