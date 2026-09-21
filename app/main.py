@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app import call_stats, nol_service, telegram
+from app import call_stats, flight_service, nol_service, telegram
 from app.config import settings
 from app.nol_service import MAX_SCAN_DAYS, NolError
 from app.ratelimit import auth_lock, run_now_limit, search_limit
@@ -381,6 +381,19 @@ async def stations(_: User = Depends(current_user)):
 
 
 # ----------------------------------------------------------------- 조회 / 감시
+@app.post("/api/flights/plan")
+async def flight_plan(req: flight_service.FlightRequest, _: User = Depends(approved_user)):
+    return {"dates": req.dates(), "configured": bool(settings.serpapi_key)}
+
+
+@app.post("/api/flights/search")
+async def flight_search(req: flight_service.FlightSearchRequest, _: User = Depends(approved_user)):
+    try:
+        return await flight_service.search(req)
+    except flight_service.FlightError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+
+
 class SearchRequest(BaseModel):
     dep: str = Field(min_length=1, max_length=20)
     arr: str = Field(min_length=1, max_length=20)

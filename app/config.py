@@ -32,6 +32,7 @@ class Settings:
     poll_interval_sec: int
     host: str
     port: int
+    serpapi_key: str = ""
 
     @property
     def telegram_configured(self) -> bool:
@@ -53,6 +54,7 @@ settings = Settings(
     poll_interval_sec=max(30, _int("POLL_INTERVAL_SEC", 60)),
     host=os.getenv("HOST", "127.0.0.1").strip() or "127.0.0.1",
     port=_int("PORT", 8000),
+    serpapi_key=os.getenv("SERPAPI_API_KEY", "").strip(),
 )
 
 DATA_DIR.mkdir(exist_ok=True)

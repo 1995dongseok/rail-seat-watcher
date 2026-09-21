@@ -115,6 +115,7 @@
   <div class="tabs" id="tabs">
     <button type="button" data-tab="train" class="on">🚄 기차</button>
     <button type="button" data-tab="show">🎫 공연</button>
+    <button type="button" data-tab="flight">✈ 항공</button>
   </div>
 
   <section id="tab_train">
@@ -218,6 +219,45 @@
     <div class="msg" id="nol_msg"></div>
     <div id="nol_results"></div>
   </form>
+  </section>
+
+  <section id="tab_flight" hidden>
+    <form class="card" id="flight_form">
+      <strong>왕복 항공권 조회</strong>
+      <p class="muted">기간 안에 출발·귀국하는 일정을 비교합니다. 시간은 각 공항 현지 기준이며, 밤샘 경유·다음 날 도착·23시 이후 도착은 제외합니다.</p>
+      <fieldset id="flight_fields">
+        <legend>여행 조건</legend>
+        <div class="grid">
+          <div><label for="flight_month">월 전체 설정</label><input id="flight_month" type="month"></div>
+          <div><label for="flight_start">기간 시작</label><input id="flight_start" type="date" required></div>
+          <div><label for="flight_end">기간 종료 (귀국 포함)</label><input id="flight_end" type="date" required></div>
+          <div><label for="flight_nights">숙박 수</label><input id="flight_nights" type="number" min="1" max="14" value="3" required></div>
+        </div>
+        <div class="row">
+          <span>출발 공항</span>
+          <label class="check"><input type="checkbox" name="flight_origin" value="ICN" checked>인천</label>
+          <label class="check"><input type="checkbox" name="flight_origin" value="GMP" checked>김포</label>
+          <label class="check"><input type="checkbox" name="flight_origin" value="CJJ" checked>청주</label>
+          <label class="check"><input id="flight_weekend" type="checkbox" checked>토·일 모두 포함</label>
+        </div>
+        <div class="grid" style="margin-top:12px">
+          <div><label for="flight_destination">도착 공항 코드 (쉼표로 복수 입력)</label><input id="flight_destination" value="PVG,SHA" required placeholder="상하이: PVG,SHA"></div>
+          <div><label for="flight_stops">경유</label><select id="flight_stops"><option value="0">직항만</option><option value="1">경유 1회까지</option></select></div>
+          <div><label for="flight_adults">성인 (이코노미)</label><input id="flight_adults" type="number" value="1" min="1" max="9" required></div>
+        </div>
+        <div class="grid" style="margin-top:12px">
+          <div><label for="flight_out_from">가는 편 출발: 시작</label><input id="flight_out_from" type="time" value="06:00" required></div>
+          <div><label for="flight_out_to">가는 편 출발: 종료</label><input id="flight_out_to" type="time" value="14:00" required></div>
+          <div><label for="flight_ret_from">오는 편 출발: 시작</label><input id="flight_ret_from" type="time" value="12:00" required></div>
+          <div><label for="flight_ret_to">오는 편 출발: 종료</label><input id="flight_ret_to" type="time" value="20:00" required></div>
+        </div>
+        <div class="row"><button type="button" id="flight_relax">양방향 06~22시로 넓히기</button></div>
+      </fieldset>
+      <p class="muted">SerpApi 무료 플랜 전용: 월 250회. 날짜 조합당 조회 1회, 귀국편 확인 시 추가 1회 사용합니다. 같은 조건은 15분간 재사용합니다. 자동 감시는 하지 않습니다.</p>
+      <div class="row"><button class="primary" id="btn_flight_search">기간 조회</button><button type="button" id="flight_stop" hidden>조회 중지</button></div>
+      <div class="msg" id="flight_msg" role="status" aria-live="polite"></div>
+    </form>
+    <div id="flight_results"></div>
   </section>
 
   <div class="card">
@@ -427,11 +467,92 @@ $('btn_run_now').addEventListener('click', async () => {
 function showTab(name) {
   $('tab_train').hidden = name !== 'train';
   $('tab_show').hidden = name !== 'show';
+  $('tab_flight').hidden = name !== 'flight';
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   try { localStorage.setItem('tab', name); } catch (e) {}
 }
 $('tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
-(function initTab() { let t = 'train'; try { t = localStorage.getItem('tab') || 'train'; } catch (e) {} showTab(t === 'show' ? 'show' : 'train'); })();
+(function initTab() { let t = 'train'; try { t = localStorage.getItem('tab') || 'train'; } catch (e) {} showTab(['show', 'flight'].includes(t) ? t : 'train'); })();
+
+// ---------------------------------------------------------------- 항공
+let flightBusy = false, flightStop = false, flightQuery = null, flightRows = [];
+function setFlightMonth() {
+  const [y, m] = $('flight_month').value.split('-').map(Number);
+  if (!y || !m) return;
+  $('flight_start').value = `${y}-${String(m).padStart(2, '0')}-01`;
+  $('flight_end').value = `${y}-${String(m).padStart(2, '0')}-${new Date(y, m, 0).getDate()}`;
+}
+const flightNow = new Date();
+$('flight_month').value = `${flightNow.getFullYear()}-${String(flightNow.getMonth() + 1).padStart(2, '0')}`;
+setFlightMonth();
+$('flight_month').addEventListener('change', setFlightMonth);
+$('flight_relax').addEventListener('click', () => {
+  $('flight_out_from').value = $('flight_ret_from').value = '06:00';
+  $('flight_out_to').value = $('flight_ret_to').value = '22:00';
+});
+$('flight_stop').addEventListener('click', () => { flightStop = true; setMsg($('flight_msg'), '현재 요청이 끝나면 중지합니다.'); });
+const flightPrice = n => `${Number(n).toLocaleString('ko-KR')}원`;
+const flightLeg = o => o.segments.map(s => `${esc(s.airline)} ${esc(s.number)} · ${esc(s.from)} ${esc(s.departure.slice(11))} → ${esc(s.to)} ${esc(s.arrival.slice(11))}`).join('<br>');
+function renderFlights() {
+  const rows = flightRows.flatMap(r => r.offers.map(o => ({r, o}))).sort((a, b) => a.o.price - b.o.price);
+  $('flight_results').innerHTML = rows.map(({r, o}, i) => {
+    o.rowIndex = i;
+    return `<div class="card"><strong>${esc(r.outbound_date)} → ${esc(r.return_date)}</strong>` +
+      `<p>${flightLeg(o)}</p><p><b>왕복 예상 ${flightPrice(o.price)}부터</b> · ${o.stops ? '경유 1회' : '직항'}</p>` +
+      `<p class="muted">${esc(r.checked_at.replace('T', ' '))} KST 조회. 귀국편 선택 전 예상가이며, 분 단위 시간·당일 귀국 조건은 귀국편 확인 후 확정됩니다.</p>` +
+      `<button type="button" ${o.departure_token ? `data-flight="${i}"` : ''} ${!o.departure_token || flightBusy || !currentAllowed ? 'disabled' : ''}>귀국편·왕복 가격 확인</button>` +
+      (r.url ? ` <a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">Google에서 검색 결과 보기</a>` : '') +
+      `<div id="flight_return_${i}" class="msg"></div></div>`;
+  }).join('');
+}
+$('flight_form').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (flightBusy || !currentAllowed) return;
+  flightBusy = true; flightStop = false; flightRows = [];
+  $('flight_results').innerHTML = ''; $('btn_flight_search').disabled = true;
+  $('flight_fields').disabled = true; $('flight_stop').hidden = false;
+  flightQuery = {start: $('flight_start').value, end: $('flight_end').value,
+    origins: [...document.querySelectorAll('[name="flight_origin"]:checked')].map(e => e.value),
+    destinations: $('flight_destination').value.split(',').map(v => v.trim()), nights: Number($('flight_nights').value),
+    weekend: $('flight_weekend').checked, adults: Number($('flight_adults').value), max_stops: Number($('flight_stops').value),
+    outbound_from: $('flight_out_from').value, outbound_to: $('flight_out_to').value,
+    return_from: $('flight_ret_from').value, return_to: $('flight_ret_to').value};
+  let completed = 0;
+  try {
+    const plan = await api('/api/flights/plan', {method:'POST', body:JSON.stringify(flightQuery)});
+    if (!plan.configured) throw new Error('서버에 SERPAPI_API_KEY 설정이 필요합니다. SerpApi 무료 플랜으로 가입한 뒤 키를 설정하세요.');
+    if (!plan.dates.length) { setMsg($('flight_msg'), '기간 안에 조건을 만족하는 출발·귀국 날짜가 없습니다.'); return; }
+    for (const day of plan.dates) {
+      if (flightStop || !currentAllowed) break;
+      setMsg($('flight_msg'), `${completed}/${plan.dates.length} 일정 완료 · ${day.outbound_date} 조회 중…`);
+      const r = await api('/api/flights/search', {method:'POST', body:JSON.stringify({...flightQuery, outbound_date:day.outbound_date})});
+      flightRows.push(r); completed++; renderFlights();
+    }
+    const count = flightRows.reduce((n, r) => n + r.offers.length, 0);
+    setMsg($('flight_msg'), `${completed}/${plan.dates.length} 일정 ${completed < plan.dates.length ? '조회 후 중지' : '조회 완료'} · 가는 편 후보 ${count}개. 왕복 예상가순이며 전체 판매처 최저가를 보장하지 않습니다.`);
+  } catch (err) { setMsg($('flight_msg'), `${completed}개 일정 조회 후 중단: ${err.message}`, true); }
+  finally {
+    flightBusy = false; $('flight_fields').disabled = false; $('flight_stop').hidden = true;
+    $('btn_flight_search').disabled = !currentAllowed; renderFlights();
+  }
+});
+$('flight_results').addEventListener('click', async e => {
+  const button = e.target.closest('button[data-flight]');
+  if (!button || flightBusy || !currentAllowed) return;
+  const index = Number(button.dataset.flight);
+  const row = flightRows.find(r => r.offers.some(o => o.rowIndex === index));
+  const offer = row.offers.find(o => o.rowIndex === index);
+  const box = $('flight_return_' + index);
+  flightBusy = true; button.disabled = true; $('btn_flight_search').disabled = true;
+  setMsg(box, '귀국편 조회 중…');
+  try {
+    const r = await api('/api/flights/search', {method:'POST', body:JSON.stringify({...flightQuery, outbound_date:row.outbound_date, departure_token:offer.departure_token})});
+    box.innerHTML = r.offers.length ? r.offers.map(o => `<p>${flightLeg(o)}<br><b>선택한 가는 편 포함 왕복 ${flightPrice(o.price)}</b></p>`).join('') : '당일 귀국·시간 조건을 만족하는 귀국편이 없습니다.';
+    if (r.url) box.innerHTML += `<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">Google에서 귀국편 선택·예약 가격 확인</a>`;
+    box.innerHTML += '<p class="muted">선택 인원 전체의 세금 포함 조회 가격입니다. 수하물·결제 조건에 따라 최종 가격이 달라질 수 있습니다.</p>';
+  } catch (err) { setMsg(box, err.message, true); }
+  finally { flightBusy = false; button.disabled = !currentAllowed; $('btn_flight_search').disabled = !currentAllowed; }
+});
 
 // ---------------------------------------------------------------- 공연 (NOL 티켓)
 let nolGoods = null;  // 선택된 공연 요약
@@ -555,6 +676,8 @@ const TRAIN_BUTTONS = ['btn_search', 'btn_watch', 'btn_run_now', 'btn_korail_tes
 function applyAllowed(allowed) {
   $('denied_box').hidden = allowed;
   for (const id of TRAIN_BUTTONS) $(id).disabled = !allowed;
+  $('btn_flight_search').disabled = !allowed || flightBusy;
+  document.querySelectorAll('[data-flight]').forEach(b => { b.disabled = !allowed || flightBusy; });
   document.querySelectorAll('#watch_body button[data-act="toggle"]').forEach(b => { b.disabled = !allowed; });
 }
 
