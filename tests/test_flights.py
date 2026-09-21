@@ -3,7 +3,7 @@ import copy
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from pydantic import ValidationError
@@ -112,6 +112,29 @@ class FlightTests(unittest.TestCase):
     def test_missing_key(self):
         with patch.object(f, "settings", SimpleNamespace(serpapi_key="")), self.assertRaises(f.FlightError):
             asyncio.run(f.search(self.req))
+
+    def test_only_admin_can_use_flight_apis(self):
+        from fastapi.testclient import TestClient
+        from app.main import app, current_user
+
+        payloads = {"/api/flights/plan": self.base,
+                    "/api/flights/search": self.base | {"outbound_date": "2026-11-05"}}
+        client = TestClient(app)
+        try:
+            with patch.object(f, "search", new_callable=AsyncMock, return_value={"offers": []}) as search:
+                for path, payload in payloads.items():
+                    self.assertEqual(client.post(path, json=payload).status_code, 401)
+                for approved in (False, True):
+                    app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=False, allowed=approved)
+                    for path, payload in payloads.items():
+                        self.assertEqual(client.post(path, json=payload).status_code, 403)
+                search.assert_not_called()
+                app.dependency_overrides[current_user] = lambda: SimpleNamespace(is_admin=True, allowed=True)
+                for path, payload in payloads.items():
+                    self.assertEqual(client.post(path, json=payload).status_code, 200)
+                search.assert_awaited_once()
+        finally:
+            app.dependency_overrides.pop(current_user, None)
 
 
 if __name__ == "__main__":

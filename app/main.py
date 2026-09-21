@@ -382,12 +382,12 @@ async def stations(_: User = Depends(current_user)):
 
 # ----------------------------------------------------------------- 조회 / 감시
 @app.post("/api/flights/plan")
-async def flight_plan(req: flight_service.FlightRequest, _: User = Depends(approved_user)):
+async def flight_plan(req: flight_service.FlightRequest, _: User = Depends(admin_user)):
     return {"dates": req.dates(), "configured": bool(settings.serpapi_key)}
 
 
 @app.post("/api/flights/search")
-async def flight_search(req: flight_service.FlightSearchRequest, _: User = Depends(approved_user)):
+async def flight_search(req: flight_service.FlightSearchRequest, _: User = Depends(admin_user)):
     try:
         return await flight_service.search(req)
     except flight_service.FlightError as exc:
